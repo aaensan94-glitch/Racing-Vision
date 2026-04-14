@@ -219,7 +219,6 @@ def main():
             ok, frame = cap.read()
             if not ok:
                 break
-            frame = cv2.flip(frame, 1)
 
         t = time.time()
 
