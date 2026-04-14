@@ -37,6 +37,7 @@ class MarkerTracker:
         self.last_pos: Optional[Position] = None
         self.last_seen_t: float = 0.0
         self.last_hsv: Optional[Tuple[float, float, float]] = None
+        self.last_contour: Optional[np.ndarray] = None
 
     def _mask(self, frame_bgr: np.ndarray) -> np.ndarray:
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
@@ -62,6 +63,7 @@ class MarkerTracker:
                 best = cnt
 
         if best is None or best_area < MIN_AREA_PX:
+            self.last_contour = None
             if self.last_pos is not None and (t - self.last_seen_t) < OCCLUSION_HOLD_S:
                 return self.last_pos, mask
             return None, mask
@@ -79,6 +81,7 @@ class MarkerTracker:
         cv2.drawContours(blob_mask, [best], -1, 255, thickness=cv2.FILLED)
         mean_hsv = cv2.mean(hsv_full, mask=blob_mask)[:3]
         self.last_hsv = (float(mean_hsv[0]), float(mean_hsv[1]), float(mean_hsv[2]))
+        self.last_contour = best
 
         self.buf.append((cx, cy))
         x = float(np.mean([p[0] for p in self.buf]))
@@ -120,6 +123,9 @@ class MultiTracker:
 
     def hsv(self, name: str) -> Optional[Tuple[float, float, float]]:
         return self.trackers[name].last_hsv
+
+    def contour(self, name: str) -> Optional[np.ndarray]:
+        return self.trackers[name].last_contour
 
     def names(self):
         return list(self.trackers.keys())

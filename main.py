@@ -260,6 +260,10 @@ def main():
 
             if gp is not None:
                 gx, gy = int(gp[0]), int(gp[1])
+                cnt = tracker.contour(name)
+                if cnt is not None:
+                    cnt_shifted = cnt + np.array([[offset[0], offset[1]]], dtype=cnt.dtype)
+                    cv2.drawContours(overlay, [cnt_shifted], -1, color, 1)
                 cv2.circle(overlay, (gx, gy), 6, color, -1)
                 cv2.putText(overlay, name, (gx + 10, gy - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
