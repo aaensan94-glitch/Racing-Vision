@@ -34,6 +34,9 @@ class GateCandidate:
     radius_b: float
     line_p1: Point
     line_p2: Point
+    digit: int = -1
+    digit_confidence: float = 0.0
+    digit_side: str = ""  # "above" | "below" | ""
 
 
 def detect_circles(gray: np.ndarray) -> np.ndarray:
@@ -185,6 +188,27 @@ def extract_gate_crops(frame_bgr: np.ndarray, gate: GateCandidate,
     return above, below
 
 
+def extract_digit_crop(frame_bgr: np.ndarray, gate: GateCandidate):
+    """Crop über den LINKEN (dunkleren) Pfostenkreis — die Ziffer ist dort
+    eingezeichnet. Benutzt das dem Kreis EINBESCHRIEBENE Quadrat
+    (Halbseite = r/sqrt(2)), damit der Kreis selbst nicht im Crop landet."""
+    if np.hypot(gate.post_b[0] - gate.post_a[0],
+                gate.post_b[1] - gate.post_a[1]) < 4.0:
+        return None
+    rotated, mx, my, L, ra, rb = _rotate_for_gate(frame_bgr, gate)
+    h, w = rotated.shape[:2]
+    cx_l = mx - L / 2.0
+    cy = my
+    half = ra / float(np.sqrt(2.0)) * 0.9
+    x0 = max(0, int(round(cx_l - half)))
+    x1 = min(w, int(round(cx_l + half)))
+    y0 = max(0, int(round(cy - half)))
+    y1 = min(h, int(round(cy + half)))
+    if x1 - x0 < 4 or y1 - y0 < 4:
+        return None
+    return rotated[y0:y1, x0:x1].copy()
+
+
 def extract_gate_overview(frame_bgr: np.ndarray, gate: GateCandidate,
                           pad_factor: float = 0.2) -> np.ndarray:
     """Rotierte Übersicht: beide Pfosten + Linie + Ziffer-Regionen sichtbar.
@@ -209,15 +233,14 @@ def extract_gate_overview(frame_bgr: np.ndarray, gate: GateCandidate,
     cv2.circle(crop, (ax_c, y_c), int(ra), (0, 255, 255), 1)
     cv2.circle(crop, (bx_c, y_c), int(rb), (0, 255, 255), 1)
 
-    # ROI-Rechtecke (above/below) einzeichnen
-    _, _, y_up0, y_up1, y_dn0, y_dn1 = _roi_bounds(
-        mx, my, L, ra, rb, 1.0, rotated.shape[1], rotated.shape[0])
-    roi_x0 = int(mx - L / 2 - ra) - x0
-    roi_x1 = int(mx + L / 2 + rb) - x0
-    up_y0, up_y1 = y_up0 - y0, y_up1 - y0
-    dn_y0, dn_y1 = y_dn0 - y0, y_dn1 - y0
-    cv2.rectangle(crop, (roi_x0, up_y0), (roi_x1, up_y1), (255, 0, 255), 1)
-    cv2.rectangle(crop, (roi_x0, dn_y0), (roi_x1, dn_y1), (255, 0, 255), 1)
+    # OCR-Rechteck: einbeschriebenes Quadrat im linken Pfostenkreis
+    half = ra / float(np.sqrt(2.0)) * 0.9
+    cx_l = mx - L / 2.0
+    ocr_x0 = int(round(cx_l - half)) - x0
+    ocr_x1 = int(round(cx_l + half)) - x0
+    ocr_y0 = int(round(my - half)) - y0
+    ocr_y1 = int(round(my + half)) - y0
+    cv2.rectangle(crop, (ocr_x0, ocr_y0), (ocr_x1, ocr_y1), (255, 0, 255), 1)
     return crop
 
 
@@ -228,11 +251,12 @@ def build_crops_panel(frame_bgr: np.ndarray, gates: List[GateCandidate],
     if not gates:
         return np.zeros((tile, tile * 3, 3), dtype=np.uint8)
     overview_w = tile * 2
+    ocr_w = tile * 2
+    sorted_gates = sorted(
+        gates, key=lambda g: (g.digit < 0, g.digit if g.digit >= 0 else 0))
     rows = []
-    for i, g in enumerate(gates):
-        above, below = extract_gate_crops(frame_bgr, g)
+    for i, g in enumerate(sorted_gates):
         overview = extract_gate_overview(frame_bgr, g)
-
         if overview.size > 0:
             oh, ow = overview.shape[:2]
             scale = min(overview_w / ow, tile / oh)
@@ -245,20 +269,72 @@ def build_crops_panel(frame_bgr: np.ndarray, gates: List[GateCandidate],
             ov_tile[y_off:y_off + new_h, x_off:x_off + new_w] = ov
         else:
             ov_tile = np.zeros((tile, overview_w, 3), dtype=np.uint8)
-        cv2.putText(ov_tile, f"G{i} rotated", (4, 14),
+        title = (f"#{g.digit} ({g.digit_confidence:.2f},{g.digit_side})"
+                 if g.digit >= 0 else f"G{i} ?")
+        cv2.putText(ov_tile, title, (4, 14),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
 
-        row_tiles = [ov_tile]
-        for label, img in (("above", above), ("below", below)):
-            if img is None or img.size == 0:
-                t = np.zeros((tile, tile, 3), dtype=np.uint8)
-            else:
-                t = cv2.resize(img, (tile, tile), interpolation=cv2.INTER_AREA)
-            cv2.putText(t, label, (4, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
-                        (0, 255, 0), 1)
-            row_tiles.append(t)
-        rows.append(np.hstack(row_tiles))
+        # OCR-Input: dynamisches ROI nach Otsu + größter Komponente (wie an den
+        # Classifier geht)
+        raw = extract_digit_crop(frame_bgr, g)
+        if raw is None:
+            ocr_img = None
+        else:
+            from digits import preprocess_canvas
+            canvas = preprocess_canvas(raw)
+            ocr_img = cv2.cvtColor(canvas, cv2.COLOR_GRAY2BGR)
+        if ocr_img is None or ocr_img.size == 0:
+            ocr_tile = np.zeros((tile, ocr_w, 3), dtype=np.uint8)
+        else:
+            oh, ow = ocr_img.shape[:2]
+            scale = min(ocr_w / ow, tile / oh)
+            new_w = max(1, int(ow * scale))
+            new_h = max(1, int(oh * scale))
+            resized = cv2.resize(ocr_img, (new_w, new_h),
+                                 interpolation=cv2.INTER_AREA)
+            ocr_tile = np.zeros((tile, ocr_w, 3), dtype=np.uint8)
+            y_off = (tile - new_h) // 2
+            x_off = (ocr_w - new_w) // 2
+            ocr_tile[y_off:y_off + new_h, x_off:x_off + new_w] = resized
+        cv2.putText(ocr_tile, "ocr", (4, 14),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+
+        rows.append(np.hstack([ov_tile, ocr_tile]))
     return np.vstack(rows)
+
+
+def classify_gate_digit(classifier, frame_bgr: np.ndarray,
+                        gate: GateCandidate):
+    """Klassifiziert above/below-Crops, übernimmt die Seite mit höherer
+    Confidence als Gate-Ziffer. Mutiert das Gate in-place und gibt
+    (digit, confidence, side) zurück."""
+    crop = extract_digit_crop(frame_bgr, gate)
+    if crop is None or crop.size == 0:
+        gate.digit, gate.digit_confidence, gate.digit_side = -1, 0.0, ""
+        return (-1, 0.0, "")
+    d, c = classifier.predict(crop)
+    gate.digit, gate.digit_confidence, gate.digit_side = d, c, "left_post"
+    return (d, c, "left_post")
+
+
+def order_gates(gates: List[GateCandidate]) -> Tuple[List[GateCandidate], List[str]]:
+    """Sortiert Gates nach erkannter Ziffer. Liefert (sorted_gates, warnings).
+    Warnt bei Duplikaten oder Lücken (0..N erwartet)."""
+    warnings: List[str] = []
+    valid = [g for g in gates if g.digit >= 0]
+    valid.sort(key=lambda g: g.digit)
+    ids = [g.digit for g in valid]
+    seen = set()
+    for i in ids:
+        if i in seen:
+            warnings.append(f"Duplicate gate id {i}")
+        seen.add(i)
+    if ids:
+        expected = set(range(max(ids) + 1))
+        missing = expected - set(ids)
+        if missing:
+            warnings.append(f"Missing gate ids: {sorted(missing)}")
+    return valid, warnings
 
 
 def gate_crossed(prev: Point, curr: Point, gate: GateCandidate) -> bool:
@@ -298,5 +374,8 @@ def draw_gates(img: np.ndarray, gates: List[GateCandidate],
         cv2.circle(img, (bx, by), int(g.radius_b), (0, 255, 255), 2)
         cv2.line(img, (ax, ay), (bx, by), (0, 255, 0), 2)
         mx, my = (ax + bx) // 2, (ay + by) // 2
-        cv2.putText(img, f"G{i}", (mx + 5, my - 5),
+        label = f"G{i}"
+        if g.digit >= 0:
+            label = f"#{g.digit} ({g.digit_confidence:.2f})"
+        cv2.putText(img, label, (mx + 5, my - 5),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)

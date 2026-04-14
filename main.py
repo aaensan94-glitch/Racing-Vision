@@ -11,7 +11,8 @@ import numpy as np
 from vision import MultiTracker
 from timing import LapTimer
 from geometry import distance_to_polyline
-from gates import detect_gates, draw_gates, build_crops_panel, GateCandidate
+from gates import (detect_gates, draw_gates, build_crops_panel,
+                   classify_gate_digit, order_gates, GateCandidate)
 
 Point = Tuple[float, float]
 
@@ -213,6 +214,7 @@ def main():
     gate_circles = None
     gate_lines = None
     show_gate_candidates = False
+    digit_classifier = None
 
     while True:
         if not paused:
@@ -376,6 +378,22 @@ def main():
             gates, gate_circles, gate_lines = detect_gates(frame)
             print(f"[gates] circles={len(gate_circles)} lines={len(gate_lines)} gates={len(gates)}")
             if gates:
+                if digit_classifier is None:
+                    from digits import DigitClassifier
+                    try:
+                        digit_classifier = DigitClassifier.load("models/digits.pt")
+                        print("[gates] loaded models/digits.pt")
+                    except FileNotFoundError:
+                        print("[gates] models/digits.pt fehlt — train_digits.py ausführen")
+                if digit_classifier is not None:
+                    for g in gates:
+                        classify_gate_digit(digit_classifier, frame, g)
+                    ordered, warns = order_gates(gates)
+                    print("[gates] order: " + " -> ".join(
+                        f"{g.digit}({g.digit_confidence:.2f},{g.digit_side})"
+                        for g in ordered))
+                    for w in warns:
+                        print(f"[gates] WARN {w}")
                 panel = build_crops_panel(frame, gates)
                 cv2.imshow("Gate Crops", panel)
         elif key == ord("G"):
