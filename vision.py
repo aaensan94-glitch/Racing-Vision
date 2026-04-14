@@ -1,57 +1,54 @@
 import json
 from dataclasses import dataclass
 from collections import deque
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import cv2
 import numpy as np
 
+# Global tracker defaults — tuned per camera/lighting, not per car.
+MIN_AREA_PX = 200
+MORPH_KERNEL = 5
+MORPH_ITER = 2
+SMOOTH_N = 5
+OCCLUSION_HOLD_S = 0.2
+
+Position = Tuple[float, float]
+
+
 @dataclass
-class MarkerConfig:
+class CarConfig:
+    name: str
     hsv_lower: Tuple[int, int, int]
     hsv_upper: Tuple[int, int, int]
-    min_area_px: int
-    morph_kernel: int
-    morph_iter: int
-    smooth_n: int
 
-    @staticmethod
-    def load(path: str) -> "MarkerConfig":
-        with open(path, "r", encoding="utf-8") as f:
-            d = json.load(f)
-        return MarkerConfig(
-            hsv_lower=tuple(d["hsv_lower"]),
-            hsv_upper=tuple(d["hsv_upper"]),
-            min_area_px=int(d["min_area_px"]),
-            morph_kernel=int(d["morph_kernel"]),
-            morph_iter=int(d["morph_iter"]),
-            smooth_n=int(d["smooth_n"]),
-        )
+    def display_color_bgr(self) -> Tuple[int, int, int]:
+        h = (self.hsv_lower[0] + self.hsv_upper[0]) // 2
+        hsv = np.uint8([[[h, 255, 255]]])
+        bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)[0, 0]
+        return int(bgr[0]), int(bgr[1]), int(bgr[2])
+
 
 class MarkerTracker:
-    """Simple HSV blob tracker for CV1."""
-    def __init__(self, cfg: MarkerConfig):
-        self.cfg = cfg
-        self.buf = deque(maxlen=max(1, cfg.smooth_n))
-        self.last_pos: Optional[Tuple[float, float]] = None
+    """HSV blob tracker for a single car."""
+    def __init__(self, car: CarConfig):
+        self.car = car
+        self.buf: deque = deque(maxlen=SMOOTH_N)
+        self.last_pos: Optional[Position] = None
         self.last_seen_t: float = 0.0
 
     def _mask(self, frame_bgr: np.ndarray) -> np.ndarray:
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-        lower = np.array(self.cfg.hsv_lower, dtype=np.uint8)
-        upper = np.array(self.cfg.hsv_upper, dtype=np.uint8)
+        lower = np.array(self.car.hsv_lower, dtype=np.uint8)
+        upper = np.array(self.car.hsv_upper, dtype=np.uint8)
         mask = cv2.inRange(hsv, lower, upper)
 
-        k = max(1, self.cfg.morph_kernel)
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=self.cfg.morph_iter)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=self.cfg.morph_iter)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (MORPH_KERNEL, MORPH_KERNEL))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=MORPH_ITER)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=MORPH_ITER)
         return mask
 
-    def update(self, frame_bgr: np.ndarray, t: float) -> Tuple[Optional[Tuple[float, float]], np.ndarray]:
-        """
-        Returns (smoothed_position or None, mask)
-        """
+    def update(self, frame_bgr: np.ndarray, t: float) -> Tuple[Optional[Position], np.ndarray]:
         mask = self._mask(frame_bgr)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
@@ -63,9 +60,8 @@ class MarkerTracker:
                 best_area = area
                 best = cnt
 
-        if best is None or best_area < self.cfg.min_area_px:
-            # allow short occlusions: keep last known position for 0.2s
-            if self.last_pos is not None and (t - self.last_seen_t) < 0.2:
+        if best is None or best_area < MIN_AREA_PX:
+            if self.last_pos is not None and (t - self.last_seen_t) < OCCLUSION_HOLD_S:
                 return self.last_pos, mask
             return None, mask
 
@@ -83,3 +79,36 @@ class MarkerTracker:
         self.last_pos = (x, y)
         self.last_seen_t = t
         return (x, y), mask
+
+
+class MultiTracker:
+    """Runs one MarkerTracker per car defined in configs/cars.json."""
+    def __init__(self, cars: Dict[str, CarConfig]):
+        self.trackers: Dict[str, MarkerTracker] = {
+            name: MarkerTracker(cfg) for name, cfg in cars.items()
+        }
+
+    @staticmethod
+    def load(path: str) -> "MultiTracker":
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        cars = {
+            name: CarConfig(
+                name=name,
+                hsv_lower=tuple(entry["hsv_lower"]),
+                hsv_upper=tuple(entry["hsv_upper"]),
+            )
+            for name, entry in raw.items()
+        }
+        if not cars:
+            raise ValueError(f"No cars defined in {path}")
+        return MultiTracker(cars)
+
+    def update(self, frame_bgr: np.ndarray, t: float) -> Dict[str, Optional[Position]]:
+        return {name: tr.update(frame_bgr, t)[0] for name, tr in self.trackers.items()}
+
+    def car(self, name: str) -> CarConfig:
+        return self.trackers[name].car
+
+    def names(self):
+        return list(self.trackers.keys())

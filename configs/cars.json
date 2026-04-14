@@ -1,0 +1,4 @@
+{
+  "cyan":    { "hsv_lower": [85, 80, 80],  "hsv_upper": [120, 255, 255] },
+  "magenta": { "hsv_lower": [140, 80, 80], "hsv_upper": [170, 255, 255] }
+}
