@@ -41,6 +41,18 @@ def side_of_line(p: Point, a: Point, b: Point) -> float:
     bx, by = b
     return (bx - ax) * (py - ay) - (by - ay) * (px - ax)
 
+def segments_intersect(p1: Point, p2: Point, a: Point, b: Point) -> bool:
+    """True if segment p1-p2 properly intersects segment a-b."""
+    d1 = side_of_line(p1, a, b)
+    d2 = side_of_line(p2, a, b)
+    d3 = side_of_line(a, p1, p2)
+    d4 = side_of_line(b, p1, p2)
+    if ((d1 > 0 and d2 < 0) or (d1 < 0 and d2 > 0)) and \
+       ((d3 > 0 and d4 < 0) or (d3 < 0 and d4 > 0)):
+        return True
+    return False
+
+
 def crossed_line(prev_p: Point, curr_p: Point, a: Point, b: Point) -> bool:
     """True if segment prev->curr crosses the infinite line through a-b (sign change)."""
     s1 = side_of_line(prev_p, a, b)

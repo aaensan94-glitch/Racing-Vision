@@ -57,6 +57,11 @@ Frame (BGR)
 - Kreuzung + Richtung korrekt → `expected_next_id = (expected_next_id + 1) % N`
 - Gate `0` erreicht → Runde +1
 
+## Fahrregeln
+- Kreuzungslinie geht **nur zwischen den Pfosten** — nicht darüber hinaus verlängern
+- **Pfosten dürfen nicht überfahren werden** (Durchfahrt zählt nur zwischen den Kreisen)
+- Verletzung = Gate nicht gültig durchfahren (spätere Ausbaustufe: Penalty / Regelcheck)
+
 ## Ziffernerkennung (CNN)
 - **Architektur**: 2× Conv(3×3) + MaxPool + FC → 10 Klassen. ~20k Parameter.
 - **Trainingsdaten**: MNIST (60k). Keine Rotations-Augmentation nötig (Rotation ist geometrisch gelöst).

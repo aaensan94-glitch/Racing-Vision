@@ -11,6 +11,7 @@ import numpy as np
 from vision import MultiTracker
 from timing import LapTimer
 from geometry import distance_to_polyline
+from gates import detect_gates, draw_gates, build_crops_panel, GateCandidate
 
 Point = Tuple[float, float]
 
@@ -208,6 +209,11 @@ def main():
     fps_last_t = time.time()
     fps_frames = 0
 
+    gates: List[GateCandidate] = []
+    gate_circles = None
+    gate_lines = None
+    show_gate_candidates = False
+
     while True:
         if not paused:
             ok, frame = cap.read()
@@ -263,6 +269,10 @@ def main():
 
         draw_polyline(overlay, ideal_points, color=(255, 255, 0), thickness=2, closed=False)
 
+        if gates or show_gate_candidates:
+            draw_gates(overlay, gates, gate_circles, gate_lines,
+                       show_candidates=show_gate_candidates)
+
         # Gefahrene Spur pro Car
         for name in car_names:
             if len(trails[name]) >= 2:
@@ -305,7 +315,7 @@ def main():
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
         mode = "LINE-DRAW" if drawing_line else "NORMAL"
-        cv2.putText(overlay, f"mode={mode}  (l=line, b=startline, r=roi, p=pause, n=reset-laps, h=hsv, f=fullscreen)",
+        cv2.putText(overlay, f"mode={mode}  (l=line, b=startline, r=roi, p=pause, n=reset-laps, h=hsv, f=fullscreen, g=gates, G=debug)",
                     (20, overlay.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
         cv2.imshow(WINDOW, overlay)
@@ -363,6 +373,15 @@ def main():
             for tr in trails.values():
                 tr.clear()
             print("[cleared] trails")
+        elif key == ord("g"):
+            gates, gate_circles, gate_lines = detect_gates(frame)
+            print(f"[gates] circles={len(gate_circles)} lines={len(gate_lines)} gates={len(gates)}")
+            if gates:
+                panel = build_crops_panel(frame, gates)
+                cv2.imshow("Gate Crops", panel)
+        elif key == ord("G"):
+            show_gate_candidates = not show_gate_candidates
+            print(f"[gates] show_candidates={show_gate_candidates}")
         elif key == ord("r"):
             paused = True
             r = cv2.selectROI(WINDOW, overlay, fromCenter=False, showCrosshair=True)
