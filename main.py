@@ -267,7 +267,9 @@ def main():
             dist = dists[name]
             dist_str = f"{dist:.1f}px" if dist is not None else "NA"
             pos_str = f"({int(gp[0])},{int(gp[1])})" if gp is not None else "none"
-            line = f"{name}: pos={pos_str} speed={speed[name]:.0f}px/s lap={lap_time:.2f}s dist={dist_str} laps={len(timers[name].laps)}"
+            hsv = tracker.hsv(name)
+            hsv_str = f"H={hsv[0]:.0f} S={hsv[1]:.0f} V={hsv[2]:.0f}" if hsv is not None else "HSV=NA"
+            line = f"{name}[{hsv_str}]: pos={pos_str} speed={speed[name]:.0f}px/s lap={lap_time:.2f}s dist={dist_str} laps={len(timers[name].laps)}"
             cv2.putText(overlay, line, (20, y_cursor), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
             y_cursor += 28
 

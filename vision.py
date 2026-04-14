@@ -6,7 +6,7 @@ from typing import Dict, Optional, Tuple
 import cv2
 import numpy as np
 
-# Global tracker defaults — tuned per camera/lighting, not per car.
+# Global tracker defaults — tuned per camera/lighting
 MIN_AREA_PX = 200
 MORPH_KERNEL = 5
 MORPH_ITER = 2
@@ -36,6 +36,7 @@ class MarkerTracker:
         self.buf: deque = deque(maxlen=SMOOTH_N)
         self.last_pos: Optional[Position] = None
         self.last_seen_t: float = 0.0
+        self.last_hsv: Optional[Tuple[float, float, float]] = None
 
     def _mask(self, frame_bgr: np.ndarray) -> np.ndarray:
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
@@ -71,6 +72,13 @@ class MarkerTracker:
 
         cx = float(M["m10"] / M["m00"])
         cy = float(M["m01"] / M["m00"])
+
+        # Mean HSV of pixels inside the blob (uses same HSV conversion as the mask)
+        hsv_full = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+        blob_mask = np.zeros(mask.shape, dtype=np.uint8)
+        cv2.drawContours(blob_mask, [best], -1, 255, thickness=cv2.FILLED)
+        mean_hsv = cv2.mean(hsv_full, mask=blob_mask)[:3]
+        self.last_hsv = (float(mean_hsv[0]), float(mean_hsv[1]), float(mean_hsv[2]))
 
         self.buf.append((cx, cy))
         x = float(np.mean([p[0] for p in self.buf]))
@@ -109,6 +117,9 @@ class MultiTracker:
 
     def car(self, name: str) -> CarConfig:
         return self.trackers[name].car
+
+    def hsv(self, name: str) -> Optional[Tuple[float, float, float]]:
+        return self.trackers[name].last_hsv
 
     def names(self):
         return list(self.trackers.keys())
