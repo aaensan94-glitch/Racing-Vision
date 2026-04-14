@@ -1,6 +1,5 @@
 import json
 from dataclasses import dataclass
-from collections import deque
 from typing import Dict, Optional, Tuple
 
 import cv2
@@ -10,7 +9,7 @@ import numpy as np
 MIN_AREA_PX = 200
 MORPH_KERNEL = 5
 MORPH_ITER = 2
-SMOOTH_N = 5
+SMOOTH_ALPHA = 0.5  # EMA weight for new position (0=frozen, 1=no smoothing)
 OCCLUSION_HOLD_S = 0.2
 
 Position = Tuple[float, float]
@@ -33,25 +32,24 @@ class MarkerTracker:
     """HSV blob tracker for a single car."""
     def __init__(self, car: CarConfig):
         self.car = car
-        self.buf: deque = deque(maxlen=SMOOTH_N)
+        self.smoothed: Optional[Position] = None
         self.last_pos: Optional[Position] = None
         self.last_seen_t: float = 0.0
         self.last_hsv: Optional[Tuple[float, float, float]] = None
         self.last_contour: Optional[np.ndarray] = None
 
-    def _mask(self, frame_bgr: np.ndarray) -> np.ndarray:
-        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+    def _mask(self, hsv_full: np.ndarray) -> np.ndarray:
         lower = np.array(self.car.hsv_lower, dtype=np.uint8)
         upper = np.array(self.car.hsv_upper, dtype=np.uint8)
-        mask = cv2.inRange(hsv, lower, upper)
+        mask = cv2.inRange(hsv_full, lower, upper)
 
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (MORPH_KERNEL, MORPH_KERNEL))
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=MORPH_ITER)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=MORPH_ITER)
         return mask
 
-    def update(self, frame_bgr: np.ndarray, t: float) -> Tuple[Optional[Position], np.ndarray]:
-        mask = self._mask(frame_bgr)
+    def update(self, hsv_full: np.ndarray, t: float) -> Tuple[Optional[Position], np.ndarray]:
+        mask = self._mask(hsv_full)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         best = None
@@ -75,21 +73,23 @@ class MarkerTracker:
         cx = float(M["m10"] / M["m00"])
         cy = float(M["m01"] / M["m00"])
 
-        # Mean HSV of pixels inside the blob (uses same HSV conversion as the mask)
-        hsv_full = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+        # Mean HSV of pixels inside the blob (same HSV frame as the mask)
         blob_mask = np.zeros(mask.shape, dtype=np.uint8)
         cv2.drawContours(blob_mask, [best], -1, 255, thickness=cv2.FILLED)
         mean_hsv = cv2.mean(hsv_full, mask=blob_mask)[:3]
         self.last_hsv = (float(mean_hsv[0]), float(mean_hsv[1]), float(mean_hsv[2]))
         self.last_contour = best
 
-        self.buf.append((cx, cy))
-        x = float(np.mean([p[0] for p in self.buf]))
-        y = float(np.mean([p[1] for p in self.buf]))
+        if self.smoothed is None:
+            self.smoothed = (cx, cy)
+        else:
+            a = SMOOTH_ALPHA
+            self.smoothed = (a * cx + (1 - a) * self.smoothed[0],
+                             a * cy + (1 - a) * self.smoothed[1])
 
-        self.last_pos = (x, y)
+        self.last_pos = self.smoothed
         self.last_seen_t = t
-        return (x, y), mask
+        return self.smoothed, mask
 
 
 class MultiTracker:
@@ -116,7 +116,8 @@ class MultiTracker:
         return MultiTracker(cars)
 
     def update(self, frame_bgr: np.ndarray, t: float) -> Dict[str, Optional[Position]]:
-        return {name: tr.update(frame_bgr, t)[0] for name, tr in self.trackers.items()}
+        hsv_full = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+        return {name: tr.update(hsv_full, t)[0] for name, tr in self.trackers.items()}
 
     def car(self, name: str) -> CarConfig:
         return self.trackers[name].car

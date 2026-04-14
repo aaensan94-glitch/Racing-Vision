@@ -2,7 +2,8 @@ import os
 import json
 import time
 import csv
-from typing import Dict, List, Tuple, Optional
+from collections import deque
+from typing import Dict, Deque, List, Tuple, Optional
 
 import cv2
 import numpy as np
@@ -94,6 +95,7 @@ CAPTURE_WIDTH = 1280
 CAPTURE_HEIGHT = 720
 CAPTURE_FPS = 30
 DISPLAY_WIDTH = 1280
+TRAIL_LEN = 0  # 0 = unbegrenzt, sonst max. Anzahl Punkte pro Spur
 
 
 def scan_cameras() -> List[Tuple[int, str]]:
@@ -166,6 +168,8 @@ def main():
     timers: Dict[str, LapTimer] = {name: LapTimer(min_lap_time_s=2.0) for name in car_names}
     prev: Dict[str, Optional[Tuple[float, float, float]]] = {name: None for name in car_names}
     speed: Dict[str, float] = {name: 0.0 for name in car_names}
+    trail_maxlen = TRAIL_LEN if TRAIL_LEN > 0 else None
+    trails: Dict[str, Deque[Point]] = {name: deque(maxlen=trail_maxlen) for name in car_names}
 
     a, b = load_start_line()
     for t_ in timers.values():
@@ -199,6 +203,10 @@ def main():
     fullscreen = False
     mouse_state = {"offset": (0, 0), "setting_start_line": False}
     cv2.setMouseCallback(WINDOW, on_mouse, mouse_state)
+
+    fps = 0.0
+    fps_last_t = time.time()
+    fps_frames = 0
 
     while True:
         if not paused:
@@ -235,6 +243,9 @@ def main():
 
             dists[name] = distance_to_polyline(gp, ideal_points) if (gp is not None and len(ideal_points) >= 2) else None
 
+            if gp is not None:
+                trails[name].append(gp)
+
         # ----- Overlay -----
         overlay = frame.copy()
 
@@ -251,6 +262,13 @@ def main():
             cv2.putText(overlay, "START", (ax, ay), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
         draw_polyline(overlay, ideal_points, color=(255, 255, 0), thickness=2, closed=False)
+
+        # Gefahrene Spur pro Car
+        for name in car_names:
+            if len(trails[name]) >= 2:
+                draw_polyline(overlay, list(trails[name]),
+                              color=tracker.car(name).display_color_bgr(),
+                              thickness=1, closed=False)
 
         # Per-car HUD block
         y_cursor = 30
@@ -276,6 +294,15 @@ def main():
             line = f"{name}[{hsv_str}]: pos={pos_str} speed={speed[name]:.0f}px/s lap={lap_time:.2f}s dist={dist_str} laps={len(timers[name].laps)}"
             cv2.putText(overlay, line, (20, y_cursor), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
             y_cursor += 28
+
+        fps_frames += 1
+        now = time.time()
+        if now - fps_last_t >= 0.5:
+            fps = fps_frames / (now - fps_last_t)
+            fps_frames = 0
+            fps_last_t = now
+        cv2.putText(overlay, f"{fps:.1f} fps", (overlay.shape[1] - 140, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
         mode = "LINE-DRAW" if drawing_line else "NORMAL"
         cv2.putText(overlay, f"mode={mode}  (l=line, b=startline, r=roi, p=pause, n=reset-laps, h=hsv, f=fullscreen)",
@@ -332,6 +359,10 @@ def main():
             for t_ in timers.values():
                 t_.reset()
             print("[reset] lap timers")
+        elif key == ord("t"):
+            for tr in trails.values():
+                tr.clear()
+            print("[cleared] trails")
         elif key == ord("r"):
             paused = True
             r = cv2.selectROI(WINDOW, overlay, fromCenter=False, showCrosshair=True)

@@ -20,7 +20,7 @@ OpenCV nutzt **andere Bereiche** als die üblichen Farbrad-Werte:
 
 ```
   0 ─── 10 ── 25 ── 35 ────── 85 ── 100 ───── 130 ────── 170 ── 180
-  │ rot │ or. │ gelb │  grün  │ cyan │  blau  │ magenta │ rot │
+  │ rot │ or. │ gelb │  grün  │ cyan │  blau   │ magenta  │ rot  │
 ```
 
 | Farbe     | H-Bereich       |
@@ -35,7 +35,7 @@ OpenCV nutzt **andere Bereiche** als die üblichen Farbrad-Werte:
 
 **Rot ist Sonderfall**: zwei Bereiche nötig oder Marker leicht orange/magenta wählen.
 
-### S und V — Fausregeln
+### S und V — Faust-Regeln
 - **`S_lower`**: meist 60–100. Tiefer → auch verwaschene Töne; zu tief → Weißabgleich flackert.
 - **`V_lower`**: meist 60–100. Tiefer → auch dunkle Ecken werden erkannt; zu tief → Rauschen.
 - **Obergrenzen** typisch beide 255.
