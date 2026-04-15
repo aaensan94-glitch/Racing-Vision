@@ -250,7 +250,7 @@ def main():
 
         cv2.putText(overlay,
                     "p=pause  t=clear-trails  h=hsv  f=fullscreen  "
-                    "g=gates  G=debug  q=quit",
+                    "g=gates  G=debug  r=sim-reverse  q=quit",
                     (20, overlay.shape[0] - 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
@@ -298,6 +298,10 @@ def main():
         elif key == ord("G"):
             show_gate_candidates = not show_gate_candidates
             print(f"[gates] show_candidates={show_gate_candidates}")
+        elif key == ord("r"):
+            if hasattr(cap, "reverse"):
+                cap.reverse()
+                print("[sim] reversed direction")
         elif key == ord("f"):
             fullscreen = not fullscreen
             cv2.setWindowProperty(

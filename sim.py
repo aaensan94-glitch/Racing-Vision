@@ -23,7 +23,7 @@ TRACK_R = 240
 
 # Drei Gates gleichmaessig auf der Bahn (Winkel in rad)
 GATE_ANGLES = (0.0, 2 * np.pi / 3, 4 * np.pi / 3)
-GATE_DIGITS = (1, 2, 3)
+GATE_DIGITS = (0, 2, 1)
 POST_R = 28
 POST_GAP = 160  # Mittelpunktsabstand der Pfosten (befahrbar ~ GAP-2R)
 
@@ -88,10 +88,10 @@ def _draw_gate(img: np.ndarray, cx: float, cy: float, tangent_angle: float,
     text = str(digit)
     side = int(POST_R * 2)
     canvas = np.full((side, side, 3), 245, dtype=np.uint8)
-    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 3)
+    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 1.1, 2)
     cv2.putText(canvas, text,
                 (side // 2 - tw // 2, side // 2 + th // 2),
-                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (20, 20, 20), 3, cv2.LINE_AA)
+                cv2.FONT_HERSHEY_SIMPLEX, 1.1, (20, 20, 20), 2, cv2.LINE_AA)
     angle_deg = float(np.degrees(np.arctan2(by - ay, bx - ax)))
     # Pipeline rotiert spaeter um +angle_deg, also hier um -angle_deg
     # vorkompensieren, damit die Ziffer im rotierten Frame aufrecht steht.
@@ -124,6 +124,14 @@ class SimCapture:
         self._bg = _build_background()
         self._t0 = time.time()
         self._opened = True
+        self._dir = -1  # -1 = Konventions-Vorwärts, +1 = Rückwärts (Test)
+
+    def reverse(self) -> None:
+        """Fahrrichtung umkehren ohne Phasensprung am aktuellen Punkt."""
+        now = time.time()
+        # ang = dir * 2π * (now - t0)/T  → dir flippen und t0 spiegeln, sodass ang gleich bleibt
+        self._t0 = 2 * now - self._t0
+        self._dir = -self._dir
 
     def isOpened(self) -> bool:
         return self._opened
@@ -133,7 +141,7 @@ class SimCapture:
             return False, None
         frame = self._bg.copy()
         t = time.time() - self._t0
-        ang = 2 * np.pi * (t / DOT_PERIOD_S)
+        ang = self._dir * 2 * np.pi * (t / DOT_PERIOD_S)
         x = int(TRACK_CX + TRACK_R * np.cos(ang))
         y = int(TRACK_CY + TRACK_R * np.sin(ang))
         cv2.circle(frame, (x, y), DOT_R, DOT_BGR, -1)
