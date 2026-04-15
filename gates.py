@@ -229,7 +229,9 @@ def extract_gate_overview(frame_bgr: np.ndarray, gate: GateCandidate,
     ax_c = int(mx - L / 2) - x0
     bx_c = int(mx + L / 2) - x0
     y_c = int(my) - y0
-    cv2.line(crop, (ax_c, y_c), (bx_c, y_c), (0, 255, 0), 1)
+    # Befahrbares Segment: nur zwischen den inneren Pfostenrändern
+    cv2.line(crop, (ax_c + int(ra), y_c), (bx_c - int(rb), y_c),
+             (0, 255, 0), 1)
     cv2.circle(crop, (ax_c, y_c), int(ra), (0, 255, 255), 1)
     cv2.circle(crop, (bx_c, y_c), int(rb), (0, 255, 255), 1)
 
@@ -372,7 +374,15 @@ def draw_gates(img: np.ndarray, gates: List[GateCandidate],
         bx, by = int(g.post_b[0]), int(g.post_b[1])
         cv2.circle(img, (ax, ay), int(g.radius_a), (0, 255, 255), 2)
         cv2.circle(img, (bx, by), int(g.radius_b), (0, 255, 255), 2)
-        cv2.line(img, (ax, ay), (bx, by), (0, 255, 0), 2)
+        # Befahrbares Segment: nur zwischen den inneren Tangenten der Pfosten
+        dx, dy = bx - ax, by - ay
+        L = float(np.hypot(dx, dy))
+        if L > g.radius_a + g.radius_b:
+            ux, uy = dx / L, dy / L
+            sx, sy = ax + ux * g.radius_a, ay + uy * g.radius_a
+            ex, ey = bx - ux * g.radius_b, by - uy * g.radius_b
+            cv2.line(img, (int(sx), int(sy)), (int(ex), int(ey)),
+                     (0, 255, 0), 2)
         mx, my = (ax + bx) // 2, (ay + by) // 2
         label = f"G{i}"
         if g.digit >= 0:
