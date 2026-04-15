@@ -88,10 +88,11 @@ def _draw_gate(img: np.ndarray, cx: float, cy: float, tangent_angle: float,
     text = str(digit)
     side = int(POST_R * 2)
     canvas = np.full((side, side, 3), 245, dtype=np.uint8)
-    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 1.1, 2)
+    font = cv2.FONT_HERSHEY_COMPLEX  # Serif → "1" mit Fuß, näher an MNIST
+    (tw, th), _ = cv2.getTextSize(text, font, 1.1, 2)
     cv2.putText(canvas, text,
                 (side // 2 - tw // 2, side // 2 + th // 2),
-                cv2.FONT_HERSHEY_SIMPLEX, 1.1, (20, 20, 20), 2, cv2.LINE_AA)
+                font, 1.1, (20, 20, 20), 2, cv2.LINE_AA)
     angle_deg = float(np.degrees(np.arctan2(by - ay, bx - ax)))
     # Pipeline rotiert spaeter um +angle_deg, also hier um -angle_deg
     # vorkompensieren, damit die Ziffer im rotierten Frame aufrecht steht.
