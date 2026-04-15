@@ -211,3 +211,5 @@ logs/*.csv
 .vscode/
 .cspell/
 cspell.json
+data/
+models/*.pt

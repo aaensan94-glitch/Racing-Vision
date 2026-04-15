@@ -1,5 +1,4 @@
 import os
-import json
 import time
 import csv
 from collections import deque
@@ -9,85 +8,30 @@ import cv2
 import numpy as np
 
 from vision import MultiTracker
-from timing import LapTimer
-from geometry import distance_to_polyline
+from gates import (detect_gates, draw_gates, build_crops_panel,
+                   classify_gate_digit, order_gates, gate_crossed,
+                   GateCandidate)
+import sound
 
 Point = Tuple[float, float]
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CFG_DIR = os.path.join(BASE_DIR, "configs")
 CARS_CFG_PATH = os.path.join(CFG_DIR, "cars.json")
-IDEAL_LINE_PATH = os.path.join(CFG_DIR, "ideal_line.json")
-START_LINE_PATH = os.path.join(CFG_DIR, "start_line.json")
 LOGS_DIR = os.path.join(BASE_DIR, "logs")
 os.makedirs(LOGS_DIR, exist_ok=True)
 
 WINDOW = "Race Vision CV1"
 
-# ----- UI state -----
-drawing_line = False
-ideal_points: List[Point] = []
-start_line_clicks: List[Point] = []
-roi = None  # (x,y,w,h)
 paused = False
 
 
-def load_ideal_line() -> List[Point]:
-    try:
-        with open(IDEAL_LINE_PATH, "r", encoding="utf-8") as f:
-            d = json.load(f)
-        return [(float(p[0]), float(p[1])) for p in d.get("points", [])]
-    except Exception:
-        return []
-
-
-def save_ideal_line(points: List[Point]):
-    with open(IDEAL_LINE_PATH, "w", encoding="utf-8") as f:
-        json.dump({"points": [[float(x), float(y)] for (x, y) in points]}, f, indent=2)
-
-
-def load_start_line() -> Tuple[Optional[Point], Optional[Point]]:
-    try:
-        with open(START_LINE_PATH, "r", encoding="utf-8") as f:
-            d = json.load(f)
-        p1 = d.get("p1")
-        p2 = d.get("p2")
-        if p1 is None or p2 is None:
-            return None, None
-        return (float(p1[0]), float(p1[1])), (float(p2[0]), float(p2[1]))
-    except Exception:
-        return None, None
-
-
-def save_start_line(a: Point, b: Point):
-    with open(START_LINE_PATH, "w", encoding="utf-8") as f:
-        json.dump({"p1": [float(a[0]), float(a[1])], "p2": [float(b[0]), float(b[1])]}, f, indent=2)
-
-
-def apply_roi(frame):
-    global roi
-    if roi is None:
-        return frame, (0, 0)
-    x, y, w, h = roi
-    x = max(0, x); y = max(0, y)
-    return frame[y:y + h, x:x + w].copy(), (x, y)
-
-
-def on_mouse(event, x, y, flags, param):
-    global drawing_line, ideal_points, start_line_clicks
-    ox, oy = param.get("offset", (0, 0))
-    gx, gy = x + ox, y + oy
-    if event == cv2.EVENT_LBUTTONDOWN:
-        if drawing_line:
-            ideal_points.append((gx, gy))
-        elif param.get("setting_start_line", False):
-            start_line_clicks.append((gx, gy))
-
-
-def draw_polyline(img, pts: List[Point], color=(255, 255, 0), thickness=2, closed=False):
+def draw_polyline(img, pts: List[Point], color=(255, 255, 0), thickness=2,
+                  closed=False):
     if pts is None or len(pts) < 2:
         return
-    p = np.array([[int(x), int(y)] for x, y in pts], dtype=np.int32).reshape((-1, 1, 2))
+    p = np.array([[int(x), int(y)] for x, y in pts],
+                 dtype=np.int32).reshape((-1, 1, 2))
     cv2.polylines(img, [p], isClosed=closed, color=color, thickness=thickness)
 
 
@@ -157,28 +101,19 @@ def prompt_camera_choice() -> int:
 
 
 def main():
-    global drawing_line, ideal_points, start_line_clicks, roi, paused
+    global paused
 
     cam_index = prompt_camera_choice()
 
     tracker = MultiTracker.load(CARS_CFG_PATH)
     car_names = tracker.names()
 
-    # Per-car state
-    timers: Dict[str, LapTimer] = {name: LapTimer(min_lap_time_s=2.0) for name in car_names}
-    prev: Dict[str, Optional[Tuple[float, float, float]]] = {name: None for name in car_names}
+    prev: Dict[str, Optional[Tuple[float, float, float]]] = {
+        name: None for name in car_names}
     speed: Dict[str, float] = {name: 0.0 for name in car_names}
     trail_maxlen = TRAIL_LEN if TRAIL_LEN > 0 else None
-    trails: Dict[str, Deque[Point]] = {name: deque(maxlen=trail_maxlen) for name in car_names}
-
-    a, b = load_start_line()
-    for t_ in timers.values():
-        if a is not None and b is not None:
-            t_.set_start_line(a, b)
-        else:
-            t_.reset()
-
-    ideal_points = load_ideal_line()
+    trails: Dict[str, Deque[Point]] = {
+        name: deque(maxlen=trail_maxlen) for name in car_names}
 
     cap = cv2.VideoCapture(cam_index)
     if not cap.isOpened():
@@ -194,43 +129,51 @@ def main():
     log_path = os.path.join(LOGS_DIR, f"log_{ts}.csv")
     log_f = open(log_path, "w", newline="", encoding="utf-8")
     writer = csv.writer(log_f)
-    writer.writerow(["t", "car", "x", "y", "speed_px_s", "dist_to_ideal_px", "lap_event_s"])
+    writer.writerow(["t", "car", "x", "y", "speed_px_s"])
 
     cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
     if actual_w > 0:
         disp_h = int(actual_h * DISPLAY_WIDTH / actual_w)
         cv2.resizeWindow(WINDOW, DISPLAY_WIDTH, disp_h)
     fullscreen = False
-    mouse_state = {"offset": (0, 0), "setting_start_line": False}
-    cv2.setMouseCallback(WINDOW, on_mouse, mouse_state)
 
     fps = 0.0
     fps_last_t = time.time()
     fps_frames = 0
+
+    gates: List[GateCandidate] = []
+    gate_circles = None
+    gate_lines = None
+    show_gate_candidates = False
+    digit_classifier = None
+    last_gate_hit: Dict[str, Tuple[float, int]] = {
+        n: (0.0, -1) for n in car_names}
+    GATE_DEBOUNCE_S = 0.5
 
     while True:
         if not paused:
             ok, frame = cap.read()
             if not ok:
                 break
-            frame = cv2.flip(frame, 1)
 
         t = time.time()
 
-        view, offset = apply_roi(frame)
-        mouse_state["offset"] = offset
+        positions = tracker.update(frame, t)
+        global_positions: Dict[str, Optional[Point]] = dict(positions)
 
-        positions = tracker.update(view, t)
-        global_positions: Dict[str, Optional[Point]] = {}
-        for name, pos in positions.items():
-            global_positions[name] = (pos[0] + offset[0], pos[1] + offset[1]) if pos is not None else None
-
-        # Per-car update: lap timing, speed, distance-to-ideal
-        dists: Dict[str, Optional[float]] = {}
-        lap_events: Dict[str, Optional[float]] = {}
         for name in car_names:
             gp = global_positions[name]
-            lap_events[name] = timers[name].update(gp, t) if gp is not None else None
+
+            if gp is not None and prev[name] is not None and gates:
+                prev_pt = (prev[name][1], prev[name][2])
+                for gi, g in enumerate(gates):
+                    if gate_crossed(prev_pt, gp, g):
+                        if (t - last_gate_hit[name][0]) > GATE_DEBOUNCE_S:
+                            last_gate_hit[name] = (t, gi)
+                            sound.play()
+                            did = g.digit if g.digit >= 0 else gi
+                            print(f"[gate] {name} crossed gate #{did} t={t:.2f}s")
+                        break
 
             if gp is not None and prev[name] is not None:
                 dt = t - prev[name][0]
@@ -241,36 +184,29 @@ def main():
             if gp is not None:
                 prev[name] = (t, gp[0], gp[1])
 
-            dists[name] = distance_to_polyline(gp, ideal_points) if (gp is not None and len(ideal_points) >= 2) else None
-
             if gp is not None:
                 trails[name].append(gp)
 
         # ----- Overlay -----
         overlay = frame.copy()
 
-        if roi is not None:
-            x, y, w, h = roi
-            cv2.rectangle(overlay, (x, y), (x + w, y + h), (200, 200, 200), 2)
+        if gates or show_gate_candidates:
+            draw_gates(overlay, gates, gate_circles, gate_lines,
+                       show_candidates=show_gate_candidates)
+            for name in car_names:
+                t_hit, gi = last_gate_hit[name]
+                if gi >= 0 and (t - t_hit) < 0.4 and gi < len(gates):
+                    g = gates[gi]
+                    ax, ay = int(g.post_a[0]), int(g.post_a[1])
+                    bx, by = int(g.post_b[0]), int(g.post_b[1])
+                    cv2.line(overlay, (ax, ay), (bx, by), (0, 255, 255), 5)
 
-        # start line (shared) — take from first timer
-        any_timer = next(iter(timers.values()))
-        if any_timer.start_line_a is not None and any_timer.start_line_b is not None:
-            ax, ay = int(any_timer.start_line_a[0]), int(any_timer.start_line_a[1])
-            bx, by = int(any_timer.start_line_b[0]), int(any_timer.start_line_b[1])
-            cv2.line(overlay, (ax, ay), (bx, by), (0, 0, 255), 3)
-            cv2.putText(overlay, "START", (ax, ay), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-
-        draw_polyline(overlay, ideal_points, color=(255, 255, 0), thickness=2, closed=False)
-
-        # Gefahrene Spur pro Car
         for name in car_names:
             if len(trails[name]) >= 2:
                 draw_polyline(overlay, list(trails[name]),
                               color=tracker.car(name).display_color_bgr(),
                               thickness=1, closed=False)
 
-        # Per-car HUD block
         y_cursor = 30
         for name in car_names:
             color = tracker.car(name).display_color_bgr()
@@ -280,19 +216,19 @@ def main():
                 gx, gy = int(gp[0]), int(gp[1])
                 cnt = tracker.contour(name)
                 if cnt is not None:
-                    cnt_shifted = cnt + np.array([[offset[0], offset[1]]], dtype=cnt.dtype)
-                    cv2.drawContours(overlay, [cnt_shifted], -1, color, 1)
+                    cv2.drawContours(overlay, [cnt], -1, color, 1)
                 cv2.circle(overlay, (gx, gy), 6, color, -1)
-                cv2.putText(overlay, name, (gx + 10, gy - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                cv2.putText(overlay, name, (gx + 10, gy - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
-            lap_time = timers[name].current_lap_time(t)
-            dist = dists[name]
-            dist_str = f"{dist:.1f}px" if dist is not None else "NA"
             pos_str = f"({int(gp[0])},{int(gp[1])})" if gp is not None else "none"
             hsv = tracker.hsv(name)
-            hsv_str = f"H={hsv[0]:.0f} S={hsv[1]:.0f} V={hsv[2]:.0f}" if hsv is not None else "HSV=NA"
-            line = f"{name}[{hsv_str}]: pos={pos_str} speed={speed[name]:.0f}px/s lap={lap_time:.2f}s dist={dist_str} laps={len(timers[name].laps)}"
-            cv2.putText(overlay, line, (20, y_cursor), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            hsv_str = (f"H={hsv[0]:.0f} S={hsv[1]:.0f} V={hsv[2]:.0f}"
+                       if hsv is not None else "HSV=NA")
+            line = (f"{name}[{hsv_str}]: pos={pos_str} "
+                    f"speed={speed[name]:.0f}px/s")
+            cv2.putText(overlay, line, (20, y_cursor),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
             y_cursor += 28
 
         fps_frames += 1
@@ -301,79 +237,60 @@ def main():
             fps = fps_frames / (now - fps_last_t)
             fps_frames = 0
             fps_last_t = now
-        cv2.putText(overlay, f"{fps:.1f} fps", (overlay.shape[1] - 140, 30),
+        cv2.putText(overlay, f"{fps:.1f} fps",
+                    (overlay.shape[1] - 140, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-        mode = "LINE-DRAW" if drawing_line else "NORMAL"
-        cv2.putText(overlay, f"mode={mode}  (l=line, b=startline, r=roi, p=pause, n=reset-laps, h=hsv, f=fullscreen)",
-                    (20, overlay.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        cv2.putText(overlay,
+                    "p=pause  t=clear-trails  h=hsv  f=fullscreen  "
+                    "g=gates  G=debug  q=quit",
+                    (20, overlay.shape[0] - 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
         cv2.imshow(WINDOW, overlay)
 
-        # CSV: one row per car per frame when seen
         for name in car_names:
             gp = global_positions[name]
             if gp is not None:
-                writer.writerow([
-                    t, name, gp[0], gp[1], speed[name],
-                    dists[name] if dists[name] is not None else "",
-                    lap_events[name] if lap_events[name] is not None else "",
-                ])
+                writer.writerow([t, name, gp[0], gp[1], speed[name]])
 
         key = cv2.waitKey(1) & 0xFF
         if key in (27, ord("q")):
             break
         elif key == ord("p"):
             paused = not paused
-        elif key == ord("l"):
-            drawing_line = not drawing_line
-            mouse_state["setting_start_line"] = False
-        elif key == ord("s"):
-            save_ideal_line(ideal_points)
-            print(f"[saved] ideal line with {len(ideal_points)} points -> {IDEAL_LINE_PATH}")
-        elif key == ord("c"):
-            ideal_points = load_ideal_line()
-            print(f"[loaded] ideal line with {len(ideal_points)} points")
-        elif key == ord("x"):
-            ideal_points = []
-            print("[cleared] ideal line (RAM only)")
-        elif key == ord("b"):
-            start_line_clicks = []
-            mouse_state["setting_start_line"] = True
-            drawing_line = False
-            print("[startline] click 2 points in the window...")
-            while True:
-                cv2.imshow(WINDOW, overlay)
-                k2 = cv2.waitKey(10) & 0xFF
-                if k2 in (27, ord("q")):
-                    break
-                if len(start_line_clicks) >= 2:
-                    a, b = start_line_clicks[0], start_line_clicks[1]
-                    for t_ in timers.values():
-                        t_.set_start_line(a, b)
-                    save_start_line(a, b)
-                    print(f"[saved] start line: {a} -> {b}")
-                    break
-            mouse_state["setting_start_line"] = False
-        elif key == ord("n"):
-            for t_ in timers.values():
-                t_.reset()
-            print("[reset] lap timers")
         elif key == ord("t"):
             for tr in trails.values():
                 tr.clear()
             print("[cleared] trails")
-        elif key == ord("r"):
-            paused = True
-            r = cv2.selectROI(WINDOW, overlay, fromCenter=False, showCrosshair=True)
-            paused = False
-            x, y, w, h = r
-            if w > 0 and h > 0:
-                roi = (int(x), int(y), int(w), int(h))
-                print(f"[roi] set to {roi}")
-            else:
-                roi = None
-                print("[roi] cleared")
+        elif key == ord("g"):
+            gates, gate_circles, gate_lines = detect_gates(frame)
+            print(f"[gates] circles={len(gate_circles)} "
+                  f"lines={len(gate_lines)} gates={len(gates)}")
+            if gates:
+                if digit_classifier is None:
+                    from digits import DigitClassifier
+                    try:
+                        digit_classifier = DigitClassifier.load(
+                            "models/digits.pt")
+                        print("[gates] loaded models/digits.pt")
+                    except FileNotFoundError:
+                        print("[gates] models/digits.pt fehlt — "
+                              "train_digits.py ausführen")
+                if digit_classifier is not None:
+                    for g in gates:
+                        classify_gate_digit(digit_classifier, frame, g)
+                    ordered, warns = order_gates(gates)
+                    print("[gates] order: " + " -> ".join(
+                        f"{g.digit}({g.digit_confidence:.2f},{g.digit_side})"
+                        for g in ordered))
+                    for w in warns:
+                        print(f"[gates] WARN {w}")
+                panel = build_crops_panel(frame, gates)
+                cv2.imshow("Gate Crops", panel)
+        elif key == ord("G"):
+            show_gate_candidates = not show_gate_candidates
+            print(f"[gates] show_candidates={show_gate_candidates}")
         elif key == ord("f"):
             fullscreen = not fullscreen
             cv2.setWindowProperty(
@@ -391,7 +308,8 @@ def main():
                 patch = frame[y0:y1, x0:x1]
                 hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
                 mean = hsv.reshape(-1, 3).mean(axis=0)
-                print(f"[HSV around {name}] H={mean[0]:.1f}, S={mean[1]:.1f}, V={mean[2]:.1f}")
+                print(f"[HSV around {name}] "
+                      f"H={mean[0]:.1f}, S={mean[1]:.1f}, V={mean[2]:.1f}")
 
     log_f.close()
     cap.release()
