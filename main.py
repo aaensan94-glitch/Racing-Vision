@@ -76,34 +76,46 @@ def scan_cameras() -> List[Tuple[int, str]]:
     return found
 
 
-def prompt_camera_choice() -> int:
+def prompt_camera_choice():
+    """Returns int (camera index) or 'sim' for the simulator."""
     print("[scan] searching for cameras...")
     cams = scan_cameras()
-    if not cams:
-        raise RuntimeError("No cameras found.")
-    if len(cams) == 1:
-        idx, name = cams[0]
-        print(f"[scan] one camera found: [{idx}] {name} — using it.")
-        return idx
-    print("[scan] available cameras:")
+    print("[scan] available sources:")
     for idx, name in cams:
         print(f"  [{idx}] {name}")
-    valid = [idx for idx, _ in cams]
+    print("  [s] Simulation")
+    valid = [str(idx) for idx, _ in cams] + ["s"]
     while True:
-        raw = input(f"Select camera index {valid}: ").strip()
+        raw = input(f"Select source {valid}: ").strip().lower()
+        if raw == "s":
+            return "sim"
         try:
             choice = int(raw)
-            if choice in valid:
+            if choice in [c[0] for c in cams]:
                 return choice
         except ValueError:
             pass
         print("invalid choice, try again.")
 
 
+def open_capture(source):
+    if source == "sim":
+        from sim import SimCapture
+        print("[capture] Simulation mode")
+        return SimCapture()
+    cap = cv2.VideoCapture(source)
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open camera index {source}")
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
+    cap.set(cv2.CAP_PROP_FPS, CAPTURE_FPS)
+    return cap
+
+
 def main():
     global paused
 
-    cam_index = prompt_camera_choice()
+    source = prompt_camera_choice()
 
     tracker = MultiTracker.load(CARS_CFG_PATH)
     car_names = tracker.names()
@@ -115,15 +127,10 @@ def main():
     trails: Dict[str, Deque[Point]] = {
         name: deque(maxlen=trail_maxlen) for name in car_names}
 
-    cap = cv2.VideoCapture(cam_index)
-    if not cap.isOpened():
-        raise RuntimeError(f"Could not open camera index {cam_index}")
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
-    cap.set(cv2.CAP_PROP_FPS, CAPTURE_FPS)
+    cap = open_capture(source)
     actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    print(f"[camera] index={cam_index} resolution={actual_w}x{actual_h}")
+    print(f"[capture] source={source} resolution={actual_w}x{actual_h}")
 
     ts = time.strftime("%Y%m%d_%H%M%S")
     log_path = os.path.join(LOGS_DIR, f"log_{ts}.csv")
