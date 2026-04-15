@@ -100,11 +100,18 @@ def pair_gates(circles: np.ndarray, lines: np.ndarray) -> List[GateCandidate]:
 
 
 def detect_gates(frame_bgr: np.ndarray):
-    """Return (gates, circles, lines). Circles/lines sind alle Kandidaten (für Debug)."""
+    """Return (gates, circles, lines). Circles/lines sind alle Kandidaten (für Debug).
+    Gates werden so kanonisiert, dass post_a der dunklere Pfosten (mit Ziffer) ist."""
     gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
     circles = detect_circles(gray)
     lines = detect_lines(gray)
     gates = pair_gates(circles, lines)
+    for g in gates:
+        ma = _circle_fill_mean(gray, g.post_a[0], g.post_a[1], g.radius_a)
+        mb = _circle_fill_mean(gray, g.post_b[0], g.post_b[1], g.radius_b)
+        if ma > mb:  # post_a heller (leer) → swap, damit Ziffer-Pfosten links/a ist
+            g.post_a, g.post_b = g.post_b, g.post_a
+            g.radius_a, g.radius_b = g.radius_b, g.radius_a
     return gates, circles, lines
 
 
@@ -377,13 +384,22 @@ def draw_gates(img: np.ndarray, gates: List[GateCandidate],
         # Befahrbares Segment: nur zwischen den inneren Tangenten der Pfosten
         dx, dy = bx - ax, by - ay
         L = float(np.hypot(dx, dy))
+        mx, my = (ax + bx) // 2, (ay + by) // 2
         if L > g.radius_a + g.radius_b:
             ux, uy = dx / L, dy / L
             sx, sy = ax + ux * g.radius_a, ay + uy * g.radius_a
             ex, ey = bx - ux * g.radius_b, by - uy * g.radius_b
             cv2.line(img, (int(sx), int(sy)), (int(ex), int(ey)),
                      (0, 255, 0), 2)
-        mx, my = (ax + bx) // 2, (ay + by) // 2
+            # Fahrrichtung: senkrecht zur Gate-Linie, von "unten" (im rotierten
+            # Frame) nach "oben" → global (uy, -ux). post_a (Ziffer) liegt links.
+            arrow_len = 0.6 * L
+            tail_x = int(mx - uy * arrow_len / 2)
+            tail_y = int(my + ux * arrow_len / 2)
+            head_x = int(mx + uy * arrow_len / 2)
+            head_y = int(my - ux * arrow_len / 2)
+            cv2.arrowedLine(img, (tail_x, tail_y), (head_x, head_y),
+                            (0, 200, 255), 2, tipLength=0.3)
         label = f"G{i}"
         if g.digit >= 0:
             label = f"#{g.digit} ({g.digit_confidence:.2f})"
