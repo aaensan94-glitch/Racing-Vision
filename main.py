@@ -174,12 +174,18 @@ def main():
             if gp is not None and prev[name] is not None and gates:
                 prev_pt = (prev[name][1], prev[name][2])
                 for gi, g in enumerate(gates):
-                    if gate_crossed(prev_pt, gp, g):
+                    direction = gate_crossed(prev_pt, gp, g)
+                    if direction != 0:
                         if (t - last_gate_hit[name][0]) > GATE_DEBOUNCE_S:
                             last_gate_hit[name] = (t, gi)
-                            sound.play()
+                            if direction > 0:
+                                sound.play()
+                            else:
+                                sound.play_alarm()
                             did = g.digit if g.digit >= 0 else gi
-                            print(f"[gate] {name} crossed gate #{did} t={t:.2f}s")
+                            arrow = "→" if direction > 0 else "⟵WRONG"
+                            print(f"[gate] {name} crossed gate #{did} "
+                                  f"{arrow} t={t:.2f}s")
                         break
 
             if gp is not None and prev[name] is not None:

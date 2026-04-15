@@ -346,23 +346,25 @@ def order_gates(gates: List[GateCandidate]) -> Tuple[List[GateCandidate], List[s
     return valid, warnings
 
 
-def gate_crossed(prev: Point, curr: Point, gate: GateCandidate) -> bool:
-    """True wenn Trajektorie prev->curr die Linie zwischen den Pfosten kreuzt,
-    ohne einen Pfosten zu überfahren.
-
-    Regeln:
-    - Kreuzung nur gültig zwischen post_a und post_b (Segment, nicht unendliche Linie)
-    - Weder prev noch curr darf innerhalb eines Pfostens liegen
-    - Trajektorie darf keinem Pfosten näher kommen als dessen Radius
-    """
+def gate_crossed(prev: Point, curr: Point, gate: GateCandidate) -> int:
+    """0 = keine Überquerung, +1 = konventionsgerechte Richtung,
+    -1 = Gegenrichtung. Kreuzung nur gültig zwischen post_a und post_b
+    und ohne Pfostenberührung."""
     if not segments_intersect(prev, curr, gate.post_a, gate.post_b):
-        return False
-    # Pfosten-Überfahrt ausschließen: Trajektorie-Segment darf Kreise nicht berühren
+        return 0
     if point_segment_distance(gate.post_a, prev, curr) < gate.radius_a:
-        return False
+        return 0
     if point_segment_distance(gate.post_b, prev, curr) < gate.radius_b:
-        return False
-    return True
+        return 0
+    # Konvention: forward = (uy, -ux) bei u = post_a -> post_b normalisiert
+    dx = gate.post_b[0] - gate.post_a[0]
+    dy = gate.post_b[1] - gate.post_a[1]
+    L = (dx * dx + dy * dy) ** 0.5
+    if L < 1e-6:
+        return 0
+    fx, fy = dy / L, -dx / L
+    vx, vy = curr[0] - prev[0], curr[1] - prev[1]
+    return 1 if (vx * fx + vy * fy) >= 0 else -1
 
 
 def draw_gates(img: np.ndarray, gates: List[GateCandidate],

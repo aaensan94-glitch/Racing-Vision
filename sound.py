@@ -1,5 +1,5 @@
 """Low-Latency Sound-Trigger: hält einen persistenten aplay-Stream offen und
-schreibt bei jedem play() ein vorgerechnetes PCM-Click direkt in stdin."""
+schreibt bei jedem play() ein vorgerechnetes PCM-Sample direkt in stdin."""
 import shutil
 import subprocess
 from typing import Optional
@@ -9,9 +9,12 @@ import numpy as np
 SAMPLE_RATE = 22050
 DURATION_S = 0.06
 FREQ_HZ = 1200
+ALARM_DURATION_S = 0.18
+ALARM_FREQ_HZ = 220  # tief + Square → kratzig
 
 _proc: Optional[subprocess.Popen] = None
 _click_bytes: Optional[bytes] = None
+_alarm_bytes: Optional[bytes] = None
 
 
 def _build_click() -> bytes:
@@ -23,11 +26,24 @@ def _build_click() -> bytes:
     return pcm.tobytes()
 
 
+def _build_alarm() -> bytes:
+    n = int(SAMPLE_RATE * ALARM_DURATION_S)
+    t = np.arange(n) / SAMPLE_RATE
+    # Square + 30 Hz Tremolo → kratziger Buzz, schneller Attack, kurzer Decay
+    square = np.sign(np.sin(2 * np.pi * ALARM_FREQ_HZ * t))
+    tremolo = 0.5 + 0.5 * np.sign(np.sin(2 * np.pi * 30.0 * t))
+    env = np.minimum(1.0, t * 80.0) * np.exp(-t * 6.0)
+    wave = square * tremolo * env
+    pcm = (wave * 32767 * 0.5).astype(np.int16)
+    return pcm.tobytes()
+
+
 def _open() -> None:
-    global _proc, _click_bytes
+    global _proc, _click_bytes, _alarm_bytes
     if _proc is not None:
         return
     _click_bytes = _build_click()
+    _alarm_bytes = _build_alarm()
     if shutil.which("pw-cat"):
         cmd = ["pw-cat", "--playback", "-",
                "--rate", str(SAMPLE_RATE),
@@ -47,13 +63,25 @@ def _open() -> None:
     )
 
 
-def play() -> None:
+def _write(buf: Optional[bytes]) -> None:
     if _proc is None:
         _open()
-    if _proc is None or _proc.stdin is None or _click_bytes is None:
+    if _proc is None or _proc.stdin is None or buf is None:
         return
     try:
-        _proc.stdin.write(_click_bytes)
+        _proc.stdin.write(buf)
         _proc.stdin.flush()
     except (BrokenPipeError, ValueError):
         pass
+
+
+def play() -> None:
+    if _proc is None:
+        _open()
+    _write(_click_bytes)
+
+
+def play_alarm() -> None:
+    if _proc is None:
+        _open()
+    _write(_alarm_bytes)
