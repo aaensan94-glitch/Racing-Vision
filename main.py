@@ -12,7 +12,9 @@ from vision import MultiTracker
 from timing import LapTimer
 from geometry import distance_to_polyline
 from gates import (detect_gates, draw_gates, build_crops_panel,
-                   classify_gate_digit, order_gates, GateCandidate)
+                   classify_gate_digit, order_gates, gate_crossed,
+                   GateCandidate)
+import sound
 
 Point = Tuple[float, float]
 
@@ -215,6 +217,9 @@ def main():
     gate_lines = None
     show_gate_candidates = False
     digit_classifier = None
+    # letzte Gate-Kreuzung pro Auto (für Overlay-Blink + Debounce)
+    last_gate_hit: Dict[str, Tuple[float, int]] = {n: (0.0, -1) for n in car_names}
+    GATE_DEBOUNCE_S = 0.5
 
     while True:
         if not paused:
@@ -238,6 +243,18 @@ def main():
         for name in car_names:
             gp = global_positions[name]
             lap_events[name] = timers[name].update(gp, t) if gp is not None else None
+
+            # Gate-Kreuzungen: prev-Position (vor dem Update) gegen jedes Gate
+            if gp is not None and prev[name] is not None and gates:
+                prev_pt = (prev[name][1], prev[name][2])
+                for gi, g in enumerate(gates):
+                    if gate_crossed(prev_pt, gp, g):
+                        if (t - last_gate_hit[name][0]) > GATE_DEBOUNCE_S:
+                            last_gate_hit[name] = (t, gi)
+                            sound.play()
+                            did = g.digit if g.digit >= 0 else gi
+                            print(f"[gate] {name} crossed gate #{did} t={t:.2f}s")
+                        break
 
             if gp is not None and prev[name] is not None:
                 dt = t - prev[name][0]
@@ -273,6 +290,14 @@ def main():
         if gates or show_gate_candidates:
             draw_gates(overlay, gates, gate_circles, gate_lines,
                        show_candidates=show_gate_candidates)
+            # Blink-Hervorhebung frisch gekreuzter Gates
+            for name in car_names:
+                t_hit, gi = last_gate_hit[name]
+                if gi >= 0 and (t - t_hit) < 0.4 and gi < len(gates):
+                    g = gates[gi]
+                    ax, ay = int(g.post_a[0]), int(g.post_a[1])
+                    bx, by = int(g.post_b[0]), int(g.post_b[1])
+                    cv2.line(overlay, (ax, ay), (bx, by), (0, 255, 255), 5)
 
         # Gefahrene Spur pro Car
         for name in car_names:
