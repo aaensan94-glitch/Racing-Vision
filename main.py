@@ -11,6 +11,7 @@ from vision import MultiTracker
 from gates import (detect_gates, draw_gates, build_crops_panel,
                    classify_gate_digit, order_gates, gate_crossed,
                    GateCandidate)
+from timing import LapTracker
 import sound
 
 Point = Tuple[float, float]
@@ -156,6 +157,7 @@ def main():
     last_gate_hit: Dict[str, Tuple[float, int]] = {
         n: (0.0, -1) for n in car_names}
     GATE_DEBOUNCE_S = 0.5
+    lap_tracker = LapTracker(car_names)
 
     while True:
         if not paused:
@@ -180,10 +182,26 @@ def main():
                             last_gate_hit[name] = (t, gi)
                             if direction > 0:
                                 sound.play()
+                                ev = lap_tracker.on_forward_crossing(
+                                    name, g.digit, t)
+                                if ev is not None and ev["lap_time_s"] is not None:
+                                    print(f"\n[lap] {name} lap {ev['lap']} "
+                                          f"time={ev['lap_time_s']:.3f}s "
+                                          f"(best={lap_tracker.best_lap_time(name):.3f}s)")
+                                    tbl = lap_tracker.race_table(name)
+                                    if tbl:
+                                        print(tbl)
+                                        print()
+                                elif ev is not None and ev["sector_s"] is not None:
+                                    delta = lap_tracker.sector_delta(name)
+                                    delta_s = f"  [{delta}]" if delta else ""
+                                    print(f"[sector] {name} gate {ev['gate']} "
+                                          f"sector={ev['sector_s']:.3f}s"
+                                          f"{delta_s}")
                             else:
                                 sound.play_alarm()
                             did = g.digit if g.digit >= 0 else gi
-                            arrow = "→" if direction > 0 else "⟵WRONG"
+                            arrow = "fwd" if direction > 0 else "WRONG"
                             print(f"[gate] {name} crossed gate #{did} "
                                   f"{arrow} t={t:.2f}s")
                         break
@@ -242,6 +260,19 @@ def main():
                     f"speed={speed[name]:.0f}px/s")
             cv2.putText(overlay, line, (20, y_cursor),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            y_cursor += 24
+
+            lap = lap_tracker.lap(name)
+            last = lap_tracker.last_lap_time(name)
+            best = lap_tracker.best_lap_time(name)
+            cur = lap_tracker.current_lap_elapsed(name, t)
+            last_s = f"{last:.3f}" if last is not None else "--"
+            best_s = f"{best:.3f}" if best is not None else "--"
+            cur_s = f"{cur:.2f}" if cur is not None else "--"
+            lap_line = (f"  lap {lap}  cur={cur_s}s  last={last_s}s  "
+                        f"best={best_s}s")
+            cv2.putText(overlay, lap_line, (20, y_cursor),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1)
             y_cursor += 28
 
         fps_frames += 1
@@ -332,6 +363,17 @@ def main():
     cap.release()
     cv2.destroyAllWindows()
     print(f"[done] log saved: {log_path}")
+
+    events_df = lap_tracker.to_dataframe()
+    if not events_df.empty:
+        events_path = os.path.join(LOGS_DIR, f"gates_{ts}.csv")
+        summary_path = os.path.join(LOGS_DIR, f"laps_{ts}.csv")
+        events_df.to_csv(events_path, index=False)
+        summary = lap_tracker.summary()
+        summary.to_csv(summary_path, index=False)
+        print(f"[done] gate events: {events_path}")
+        print(f"[done] lap summary: {summary_path}")
+        print(summary.to_string(index=False))
 
 
 if __name__ == "__main__":
