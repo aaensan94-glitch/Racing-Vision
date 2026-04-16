@@ -47,6 +47,18 @@ WINDOW = "Race Vision CV1"
 paused = False
 
 
+def _panel(img, x: int, y: int, w: int, h: int, alpha: float = 0.6) -> None:
+    """Dark translucent background so Text über hellem Papier lesbar bleibt."""
+    H, W = img.shape[:2]
+    x0, y0 = max(0, x), max(0, y)
+    x1, y1 = min(W, x + w), min(H, y + h)
+    if x1 <= x0 or y1 <= y0:
+        return
+    sub = img[y0:y1, x0:x1]
+    dark = np.zeros_like(sub)
+    cv2.addWeighted(sub, 1 - alpha, dark, alpha, 0, sub)
+
+
 def draw_polyline(img, pts: List[Point], color=(255, 255, 0), thickness=2,
                   closed=False):
     if pts is None or len(pts) < 2:
@@ -194,7 +206,7 @@ def main():
         n: (0.0, -1) for n in car_names}
     GATE_DEBOUNCE_S = 0.3
     lap_tracker = LapTracker(car_names)
-    RACE_LAPS = 15
+    RACE_LAPS = 5
     race_active = False
     race_finished: Dict[str, bool] = {n: False for n in car_names}
     countdown_t0: Optional[float] = None
@@ -386,7 +398,8 @@ def main():
                 draw_polyline(overlay, lap_trail[name],
                               color=color, thickness=3, closed=False)
 
-        y_cursor = 30
+        # Per-Car Info als Block: erst sammeln, dann Panel + Text
+        info_lines: List[Tuple[str, Tuple[int, int, int]]] = []
         for name in car_names:
             color = tracker.car(name).display_color_bgr()
             gp = global_positions[name]
@@ -398,17 +411,16 @@ def main():
                     cv2.drawContours(overlay, [cnt], -1, color, 1)
                 cv2.circle(overlay, (gx, gy), 6, color, -1)
                 cv2.putText(overlay, name, (gx + 10, gy - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2,
+                            cv2.LINE_AA)
 
             pos_str = f"({int(gp[0])},{int(gp[1])})" if gp is not None else "none"
             hsv = tracker.hsv(name)
-            hsv_str = (f"H={hsv[0]:.0f} S={hsv[1]:.0f} V={hsv[2]:.0f}"
+            hsv_str = (f"H{hsv[0]:.0f} S{hsv[1]:.0f} V{hsv[2]:.0f}"
                        if hsv is not None else "HSV=NA")
-            line = (f"{name}[{hsv_str}]: pos={pos_str} "
-                    f"speed={speed[name]:.0f}px/s")
-            cv2.putText(overlay, line, (20, y_cursor),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-            y_cursor += 24
+            info_lines.append(
+                (f"{name}  {hsv_str}  {pos_str}  {speed[name]:.0f}px/s",
+                 color))
 
             lap = lap_tracker.lap(name)
             last = lap_tracker.last_lap_time(name)
@@ -417,11 +429,23 @@ def main():
             last_s = f"{last:.3f}" if last is not None else "--"
             best_s = f"{best:.3f}" if best is not None else "--"
             cur_s = f"{cur:.2f}" if cur is not None else "--"
-            lap_line = (f"  lap {lap}  cur={cur_s}s  last={last_s}s  "
-                        f"best={best_s}s")
-            cv2.putText(overlay, lap_line, (20, y_cursor),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1)
-            y_cursor += 28
+            info_lines.append(
+                (f"  lap {lap}  cur {cur_s}s  last {last_s}s  best {best_s}s",
+                 color))
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.55
+        line_h = 22
+        pad = 10
+        widths = [cv2.getTextSize(t, font, scale, 1)[0][0] for t, _ in info_lines]
+        panel_w = (max(widths) if widths else 0) + 2 * pad
+        panel_h = len(info_lines) * line_h + 2 * pad
+        _panel(overlay, 10, 10, panel_w, panel_h)
+        y_cursor = 10 + pad + line_h - 6
+        for text, col in info_lines:
+            cv2.putText(overlay, text, (10 + pad, y_cursor),
+                        font, scale, col, 1, cv2.LINE_AA)
+            y_cursor += line_h
 
         # Countdown / Race Overlay
         if countdown_t0 is not None:
@@ -449,11 +473,6 @@ def main():
                     color = (30, 30, 30)  # Aus
                 cv2.circle(overlay, (lx, cy), lamp_r, color, -1)
                 cv2.circle(overlay, (lx, cy), lamp_r, (60, 60, 60), 2)
-        elif race_active:
-            laps_done = max(lap_tracker.lap(n) for n in car_names)
-            cv2.putText(overlay, f"Race: {laps_done}/{RACE_LAPS}",
-                        (overlay.shape[1] - 280, 60),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
 
         fps_frames += 1
         now = time.time()
@@ -461,17 +480,57 @@ def main():
             fps = fps_frames / (now - fps_last_t)
             fps_frames = 0
             fps_last_t = now
-        cv2.putText(overlay, f"{fps:.1f} fps",
-                    (overlay.shape[1] - 140, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-        keys_help = ("s=start  n=new-race  p=pause  t=clear-trails  "
-                     "h=hsv  f=fullscreen  g=gates  G=debug  e=clahe  q=quit")
+        # Top-Right: FPS + Race-Status gemeinsames Panel
+        tr_lines: List[Tuple[str, Tuple[int, int, int]]] = [
+            (f"{fps:.1f} fps", (0, 255, 0))]
+        if race_active:
+            laps_done = max(lap_tracker.lap(n) for n in car_names)
+            tr_lines.append(
+                (f"Race {laps_done}/{RACE_LAPS}", (0, 200, 255)))
+        elif countdown_t0 is None:
+            tr_lines.append(
+                (f"Laps: {RACE_LAPS}  [<- ->]", (180, 180, 180)))
+        tr_font = cv2.FONT_HERSHEY_SIMPLEX
+        tr_scale = 0.6
+        tr_widths = [cv2.getTextSize(t, tr_font, tr_scale, 1)[0][0]
+                     for t, _ in tr_lines]
+        tr_pad = 10
+        tr_line_h = 24
+        tr_w = max(tr_widths) + 2 * tr_pad
+        tr_h = len(tr_lines) * tr_line_h + 2 * tr_pad
+        tr_x = overlay.shape[1] - tr_w - 10
+        tr_y = 10
+        _panel(overlay, tr_x, tr_y, tr_w, tr_h)
+        y = tr_y + tr_pad + tr_line_h - 6
+        for text, col in tr_lines:
+            cv2.putText(overlay, text, (tr_x + tr_pad, y),
+                        tr_font, tr_scale, col, 1, cv2.LINE_AA)
+            y += tr_line_h
+
+        # Bottom: Hilfe-Zeilen — gesplittet damit sie ins Fenster passen
+        help_lines = [
+            "s=start  n=new-race  p=pause  t=clear-trails  h=hsv",
+            "f=fullscreen  g=gates  G=debug  e=clahe  q=quit",
+        ]
         if source == "sim":
-            keys_help += "  r=reverse  Up/Dn=speed"
-        cv2.putText(overlay, keys_help,
-                    (20, overlay.shape[0] - 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            help_lines.append("r=reverse  Up/Dn=speed")
+        h_font = cv2.FONT_HERSHEY_SIMPLEX
+        h_scale = 0.5
+        h_line_h = 20
+        h_pad = 8
+        h_widths = [cv2.getTextSize(t, h_font, h_scale, 1)[0][0]
+                    for t in help_lines]
+        h_w = max(h_widths) + 2 * h_pad
+        h_h = len(help_lines) * h_line_h + 2 * h_pad
+        h_x = 10
+        h_y = overlay.shape[0] - h_h - 10
+        _panel(overlay, h_x, h_y, h_w, h_h)
+        hy = h_y + h_pad + h_line_h - 5
+        for text in help_lines:
+            cv2.putText(overlay, text, (h_x + h_pad, hy),
+                        h_font, h_scale, (230, 230, 230), 1, cv2.LINE_AA)
+            hy += h_line_h
 
         cv2.imshow(WINDOW, overlay)
 
@@ -572,6 +631,12 @@ def main():
         elif key == 84 and hasattr(cap, "speed_down"):  # arrow down
             cap.speed_down()
             print(f"[sim] slower — period={cap._period:.2f}s")
+        elif key == 83 and not race_active and countdown_t0 is None:  # arrow right
+            RACE_LAPS = min(100, RACE_LAPS + 5)
+            print(f"[race] laps={RACE_LAPS}")
+        elif key == 81 and not race_active and countdown_t0 is None:  # arrow left
+            RACE_LAPS = max(5, RACE_LAPS - 5)
+            print(f"[race] laps={RACE_LAPS}")
         elif key == ord("f"):
             fullscreen = not fullscreen
             cv2.setWindowProperty(
