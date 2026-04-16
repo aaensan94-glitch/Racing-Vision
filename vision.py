@@ -9,7 +9,7 @@ import numpy as np
 MIN_AREA_PX = 200
 MORPH_KERNEL = 5
 MORPH_ITER = 2
-SMOOTH_ALPHA = 0.5  # EMA weight for new position (0=frozen, 1=no smoothing)
+SMOOTH_ALPHA = 0.85  # EMA weight for new position (0=frozen, 1=no smoothing)
 OCCLUSION_HOLD_S = 0.2
 
 Position = Tuple[float, float]

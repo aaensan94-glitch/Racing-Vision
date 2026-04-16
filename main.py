@@ -31,6 +31,14 @@ def draw_polyline(img, pts: List[Point], color=(255, 255, 0), thickness=2,
                   closed=False):
     if pts is None or len(pts) < 2:
         return
+    from geometry import catmull_rom
+    if len(pts) >= 4:
+        smooth: List[Point] = []
+        for i in range(1, len(pts) - 2):
+            smooth.extend(catmull_rom(pts[i - 1], pts[i], pts[i + 1],
+                                      pts[i + 2], n=6))
+        if smooth:
+            pts = smooth
     p = np.array([[int(x), int(y)] for x, y in pts],
                  dtype=np.int32).reshape((-1, 1, 2))
     cv2.polylines(img, [p], isClosed=closed, color=color, thickness=thickness)
@@ -177,7 +185,9 @@ def main():
             if gp is not None and prev[name] is not None and gates:
                 prev_pt = (prev[name][1], prev[name][2])
                 for gi, g in enumerate(gates):
-                    direction = gate_crossed(prev_pt, gp, g)
+                    direction = gate_crossed(
+                        prev_pt, gp, g,
+                        trail=list(trails[name]))
                     if direction != 0:
                         if (t - last_gate_hit[name][0]) > GATE_DEBOUNCE_S:
                             last_gate_hit[name] = (t, gi)
@@ -295,7 +305,7 @@ def main():
         keys_help = ("p=pause  t=clear-trails  h=hsv  f=fullscreen  "
                      "g=gates  G=debug  e=clahe  q=quit")
         if source == "sim":
-            keys_help += "  r=reverse"
+            keys_help += "  r=reverse  Up/Dn=speed"
         cv2.putText(overlay, keys_help,
                     (20, overlay.shape[0] - 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
@@ -352,6 +362,12 @@ def main():
             if hasattr(cap, "reverse"):
                 cap.reverse()
                 print("[sim] reversed direction")
+        elif key == 82 and hasattr(cap, "speed_up"):  # arrow up
+            cap.speed_up()
+            print(f"[sim] faster — period={cap._period:.2f}s")
+        elif key == 84 and hasattr(cap, "speed_down"):  # arrow down
+            cap.speed_down()
+            print(f"[sim] slower — period={cap._period:.2f}s")
         elif key == ord("f"):
             fullscreen = not fullscreen
             cv2.setWindowProperty(

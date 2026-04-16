@@ -1,5 +1,5 @@
 import math
-from typing import Tuple
+from typing import List, Tuple
 
 Point = Tuple[float, float]
 
@@ -43,3 +43,23 @@ def segments_intersect(p1: Point, p2: Point, a: Point, b: Point) -> bool:
        ((d3 > 0 and d4 < 0) or (d3 < 0 and d4 > 0)):
         return True
     return False
+
+
+def catmull_rom(p0: Point, p1: Point, p2: Point, p3: Point,
+                n: int = 10) -> List[Point]:
+    """n gleichmäßige Punkte auf dem Catmull-Rom Segment zwischen p1 und p2,
+    mit p0/p3 als Tangenten-Stützpunkte."""
+    pts: List[Point] = []
+    for i in range(n + 1):
+        t = i / n
+        t2, t3 = t * t, t * t * t
+        x = 0.5 * ((2 * p1[0]) +
+                    (-p0[0] + p2[0]) * t +
+                    (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 +
+                    (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3)
+        y = 0.5 * ((2 * p1[1]) +
+                    (-p0[1] + p2[1]) * t +
+                    (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 +
+                    (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3)
+        pts.append((x, y))
+    return pts
