@@ -99,10 +99,15 @@ def pair_gates(circles: np.ndarray, lines: np.ndarray) -> List[GateCandidate]:
     return gates
 
 
-def detect_gates(frame_bgr: np.ndarray):
+_clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+
+
+def detect_gates(frame_bgr: np.ndarray, use_clahe: bool = False):
     """Return (gates, circles, lines). Circles/lines sind alle Kandidaten (für Debug).
     Gates werden so kanonisiert, dass post_a der dunklere Pfosten (mit Ziffer) ist."""
     gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    if use_clahe:
+        gray = _clahe.apply(gray)
     circles = detect_circles(gray)
     lines = detect_lines(gray)
     gates = pair_gates(circles, lines)

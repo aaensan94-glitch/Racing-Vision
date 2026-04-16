@@ -153,6 +153,7 @@ def main():
     gate_circles = None
     gate_lines = None
     show_gate_candidates = False
+    use_clahe = False
     digit_classifier = None
     last_gate_hit: Dict[str, Tuple[float, int]] = {
         n: (0.0, -1) for n in car_names}
@@ -219,7 +220,13 @@ def main():
                 trails[name].append(gp)
 
         # ----- Overlay -----
-        overlay = frame.copy()
+        if use_clahe:
+            from gates import _clahe
+            lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+            lab[:, :, 0] = _clahe.apply(lab[:, :, 0])
+            overlay = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+        else:
+            overlay = frame.copy()
 
         if gates or show_gate_candidates:
             draw_gates(overlay, gates, gate_circles, gate_lines,
@@ -287,7 +294,7 @@ def main():
 
         cv2.putText(overlay,
                     "p=pause  t=clear-trails  h=hsv  f=fullscreen  "
-                    "g=gates  G=debug  r=sim-reverse  q=quit",
+                    "g=gates  G=debug  e=clahe  r=sim-reverse  q=quit",
                     (20, overlay.shape[0] - 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
@@ -307,8 +314,12 @@ def main():
             for tr in trails.values():
                 tr.clear()
             print("[cleared] trails")
+        elif key == ord("e"):
+            use_clahe = not use_clahe
+            print(f"[clahe] {'ON' if use_clahe else 'OFF'}")
         elif key == ord("g"):
-            gates, gate_circles, gate_lines = detect_gates(frame)
+            gates, gate_circles, gate_lines = detect_gates(
+                frame, use_clahe=use_clahe)
             print(f"[gates] circles={len(gate_circles)} "
                   f"lines={len(gate_lines)} gates={len(gates)}")
             if gates:
