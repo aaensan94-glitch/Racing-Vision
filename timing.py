@@ -126,6 +126,7 @@ class LapTracker:
         best_lap_nr = completed_laps.loc[
             completed_laps["lap_time_s"].idxmin(), "lap"]
         best = (cf[(cf["lap"] == best_lap_nr) & (cf["gate"] > 0)]
+                .drop_duplicates(subset=["gate"], keep="last")
                 .set_index("gate")["sector_s"])
         # aktuelle Runde = alles nach dem letzten gate-0-Event, nur gate > 0
         gate0_times = cf[cf["gate"] == 0]["t"]
