@@ -165,9 +165,11 @@ def main():
     show_gate_candidates = False
     use_clahe = False
     digit_classifier = None
-    last_gate_hit: Dict[str, Tuple[float, int]] = {
+    last_gate_hit: Dict[str, Dict[int, float]] = {
+        n: {} for n in car_names}
+    last_gate_flash: Dict[str, Tuple[float, int]] = {
         n: (0.0, -1) for n in car_names}
-    GATE_DEBOUNCE_S = 0.5
+    GATE_DEBOUNCE_S = 0.3
     lap_tracker = LapTracker(car_names)
     RACE_LAPS = 15
     race_active = False
@@ -206,7 +208,8 @@ def main():
                     best_trail[name].clear()
                     prev[name] = None
                     speed[name] = 0.0
-                    last_gate_hit[name] = (0.0, -1)
+                    last_gate_hit[name] = {}
+                    last_gate_flash[name] = (0.0, -1)
                     race_finished[name] = False
                 countdown_t0 = None
                 print(f"[race] GO! {RACE_LAPS} laps")
@@ -220,12 +223,14 @@ def main():
             if gp is not None and prev[name] is not None and gates:
                 prev_pt = (prev[name][1], prev[name][2])
                 for gi, g in enumerate(gates):
+                    trail_tail = list(trails[name])[-4:]
                     direction = gate_crossed(
                         prev_pt, gp, g,
-                        trail=list(trails[name]))
+                        trail=trail_tail)
                     if direction != 0:
-                        if (t - last_gate_hit[name][0]) > GATE_DEBOUNCE_S:
-                            last_gate_hit[name] = (t, gi)
+                        if (t - last_gate_hit[name].get(gi, 0.0)) > GATE_DEBOUNCE_S:
+                            last_gate_hit[name][gi] = t
+                            last_gate_flash[name] = (t, gi)
                             if direction > 0:
                                 sound.play()
                                 ev = lap_tracker.on_forward_crossing(
@@ -298,7 +303,7 @@ def main():
             draw_gates(overlay, gates, gate_circles, gate_lines,
                        show_candidates=show_gate_candidates)
             for name in car_names:
-                t_hit, gi = last_gate_hit[name]
+                t_hit, gi = last_gate_flash[name]
                 if gi >= 0 and (t - t_hit) < 0.4 and gi < len(gates):
                     g = gates[gi]
                     ax, ay = int(g.post_a[0]), int(g.post_a[1])
@@ -426,7 +431,8 @@ def main():
                 best_trail[name].clear()
                 prev[name] = None
                 speed[name] = 0.0
-                last_gate_hit[name] = (0.0, -1)
+                last_gate_hit[name] = {}
+                last_gate_flash[name] = (0.0, -1)
             print("[reset] new race — gates kept")
         elif key == ord("t"):
             for tr in trails.values():
