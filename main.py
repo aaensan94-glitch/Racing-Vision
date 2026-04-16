@@ -292,9 +292,11 @@ def main():
                     (overlay.shape[1] - 140, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-        cv2.putText(overlay,
-                    "p=pause  t=clear-trails  h=hsv  f=fullscreen  "
-                    "g=gates  G=debug  e=clahe  r=sim-reverse  q=quit",
+        keys_help = ("p=pause  t=clear-trails  h=hsv  f=fullscreen  "
+                     "g=gates  G=debug  e=clahe  q=quit")
+        if source == "sim":
+            keys_help += "  r=reverse"
+        cv2.putText(overlay, keys_help,
                     (20, overlay.shape[0] - 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
