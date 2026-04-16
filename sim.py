@@ -47,12 +47,16 @@ def _dot_bgr_from_cars(cfg_path: str, car: str = "cyan") -> Tuple[int, int, int]
         bgr = cv2.cvtColor(px, cv2.COLOR_HSV2BGR)[0, 0]
         return (int(bgr[0]), int(bgr[1]), int(bgr[2]))
     except (OSError, KeyError, ValueError):
-        return (255, 255, 0)
+        return (255, 255, 0) if car == "cyan" else (255, 0, 255)
 
 
-DOT_BGR = _dot_bgr_from_cars(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                 "configs", "cars.json"))
+_CARS_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "configs", "cars.json")
+DOT_BGR = _dot_bgr_from_cars(_CARS_JSON, "cyan")
+DOT2_BGR = _dot_bgr_from_cars(_CARS_JSON, "magenta")
+DOT2_PHASE = np.pi  # 180° versetzt auf der Kreisbahn
+DOT_R_OFFSET = -20   # Cyan fährt etwas innen
+DOT2_R_OFFSET = 20   # Magenta fährt etwas aussen
 
 
 def _draw_gate(img: np.ndarray, cx: float, cy: float, tangent_angle: float,
@@ -162,9 +166,15 @@ class SimCapture:
         frame = self._bg.copy()
         t = time.time() - self._t0
         ang = self._dir * 2 * np.pi * (t / self._period)
-        x = int(TRACK_CX + TRACK_R * np.cos(ang))
-        y = int(TRACK_CY + TRACK_R * np.sin(ang))
+        r1 = TRACK_R + DOT_R_OFFSET
+        x = int(TRACK_CX + r1 * np.cos(ang))
+        y = int(TRACK_CY + r1 * np.sin(ang))
         cv2.circle(frame, (x, y), DOT_R, DOT_BGR, -1)
+        # Magenta-Punkt: gleiche Bahn, 180° versetzt, leicht aussen
+        r2 = TRACK_R + DOT2_R_OFFSET
+        x2 = int(TRACK_CX + r2 * np.cos(ang + DOT2_PHASE))
+        y2 = int(TRACK_CY + r2 * np.sin(ang + DOT2_PHASE))
+        cv2.circle(frame, (x2, y2), DOT_R, DOT2_BGR, -1)
         # an FPS koppeln, damit der Loop nicht durchrennt
         time.sleep(max(0.0, 1.0 / FPS - 0.001))
         return True, frame
