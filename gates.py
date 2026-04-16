@@ -37,6 +37,7 @@ class GateCandidate:
     digit: int = -1
     digit_confidence: float = 0.0
     digit_side: str = ""  # "above" | "below" | ""
+    forward: Point = (0.0, 0.0)  # Konventions-Vorwärtsrichtung (aus Gate-Rotation)
 
 
 def detect_circles(gray: np.ndarray) -> np.ndarray:
@@ -153,18 +154,20 @@ def _orient_posts(gray: np.ndarray, gate: GateCandidate):
 def _rotate_for_gate(frame_bgr: np.ndarray, gate: GateCandidate):
     """Rotiert den Frame so, dass die Pfostenverbindung horizontal liegt
     und der leere (hellere) Pfosten rechts landet. Liefert
-    (rotated, mx, my, L, ra, rb)."""
+    (rotated, mx, my, L, ra, rb, forward)."""
     gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
     (ax, ay), (bx, by), ra, rb = _orient_posts(gray, gate)
     dx, dy = bx - ax, by - ay
     L = float(np.hypot(dx, dy))
     mx, my = (ax + bx) / 2.0, (ay + by) / 2.0
     angle_deg = float(np.degrees(np.arctan2(dy, dx)))
+    # Forward-Richtung: senkrecht auf digit→leer, "von unten" im rotierten Frame
+    forward = (dy / L, -dx / L) if L > 1e-6 else (0.0, 0.0)
     h, w = frame_bgr.shape[:2]
     M = cv2.getRotationMatrix2D((mx, my), angle_deg, 1.0)
     rotated = cv2.warpAffine(frame_bgr, M, (w, h), flags=cv2.INTER_LINEAR,
                              borderMode=cv2.BORDER_REPLICATE)
-    return rotated, mx, my, L, float(ra), float(rb)
+    return rotated, mx, my, L, float(ra), float(rb), forward
 
 
 def _roi_bounds(mx: float, my: float, L: float, ra: float, rb: float,
@@ -187,7 +190,7 @@ def extract_gate_crops(frame_bgr: np.ndarray, gate: GateCandidate,
     if np.hypot(gate.post_b[0] - gate.post_a[0],
                 gate.post_b[1] - gate.post_a[1]) < 4.0:
         return None, None
-    rotated, mx, my, L, ra, rb = _rotate_for_gate(frame_bgr, gate)
+    rotated, mx, my, L, ra, rb, _fwd = _rotate_for_gate(frame_bgr, gate)
     h, w = rotated.shape[:2]
     x0, x1, y_up0, y_up1, y_dn0, y_dn1 = _roi_bounds(
         mx, my, L, ra, rb, height_factor, w, h)
@@ -207,7 +210,7 @@ def extract_digit_crop(frame_bgr: np.ndarray, gate: GateCandidate):
     if np.hypot(gate.post_b[0] - gate.post_a[0],
                 gate.post_b[1] - gate.post_a[1]) < 4.0:
         return None
-    rotated, mx, my, L, ra, rb = _rotate_for_gate(frame_bgr, gate)
+    rotated, mx, my, L, ra, rb, _fwd = _rotate_for_gate(frame_bgr, gate)
     h, w = rotated.shape[:2]
     cx_l = mx - L / 2.0
     cy = my
@@ -225,7 +228,7 @@ def extract_gate_overview(frame_bgr: np.ndarray, gate: GateCandidate,
                           pad_factor: float = 0.2) -> np.ndarray:
     """Rotierte Übersicht: beide Pfosten + Linie + Ziffer-Regionen sichtbar.
     Linie und Pfostenkreise werden als Overlay eingezeichnet."""
-    rotated, mx, my, L, ra, rb = _rotate_for_gate(frame_bgr, gate)
+    rotated, mx, my, L, ra, rb, _fwd = _rotate_for_gate(frame_bgr, gate)
     h, w = rotated.shape[:2]
     pad_x = int(L * pad_factor + max(ra, rb))
     pad_y = int(L)
@@ -319,9 +322,12 @@ def build_crops_panel(frame_bgr: np.ndarray, gates: List[GateCandidate],
 
 def classify_gate_digit(classifier, frame_bgr: np.ndarray,
                         gate: GateCandidate):
-    """Klassifiziert above/below-Crops, übernimmt die Seite mit höherer
-    Confidence als Gate-Ziffer. Mutiert das Gate in-place und gibt
-    (digit, confidence, side) zurück."""
+    """Klassifiziert den Digit-Crop, setzt digit + forward-Vektor aus der
+    stabilen Gate-Rotation. Mutiert das Gate in-place."""
+    # Forward-Vektor aus der Rotation herleiten (stabil, unabhängig von
+    # der möglicherweise instabilen Helligkeits-Kanonisierung in detect_gates)
+    rotated, mx, my, L, ra, rb, fwd = _rotate_for_gate(frame_bgr, gate)
+    gate.forward = fwd
     crop = extract_digit_crop(frame_bgr, gate)
     if crop is None or crop.size == 0:
         gate.digit, gate.digit_confidence, gate.digit_side = -1, 0.0, ""
@@ -360,12 +366,15 @@ def _check_segment(a: Point, b: Point, gate: GateCandidate) -> int:
         return 0
     if point_segment_distance(gate.post_b, a, b) < gate.radius_b:
         return 0
-    dx = gate.post_b[0] - gate.post_a[0]
-    dy = gate.post_b[1] - gate.post_a[1]
-    L = (dx * dx + dy * dy) ** 0.5
-    if L < 1e-6:
-        return 0
-    fx, fy = dy / L, -dx / L
+    # Forward aus stabiler Gate-Rotation, Fallback auf post_a→post_b Normale
+    fx, fy = gate.forward
+    if abs(fx) < 1e-6 and abs(fy) < 1e-6:
+        dx = gate.post_b[0] - gate.post_a[0]
+        dy = gate.post_b[1] - gate.post_a[1]
+        L = (dx * dx + dy * dy) ** 0.5
+        if L < 1e-6:
+            return 0
+        fx, fy = dy / L, -dx / L
     vx, vy = b[0] - a[0], b[1] - a[1]
     return 1 if (vx * fx + vy * fy) >= 0 else -1
 
@@ -419,13 +428,16 @@ def draw_gates(img: np.ndarray, gates: List[GateCandidate],
             ex, ey = bx - ux * g.radius_b, by - uy * g.radius_b
             cv2.line(img, (int(sx), int(sy)), (int(ex), int(ey)),
                      (0, 255, 0), 2)
-            # Fahrrichtung: senkrecht zur Gate-Linie, von "unten" (im rotierten
-            # Frame) nach "oben" → global (uy, -ux). post_a (Ziffer) liegt links.
+            # Fahrrichtung: aus stabiler Gate-Rotation (gesetzt in classify_gate_digit),
+            # Fallback auf (uy, -ux) wenn noch nicht klassifiziert
+            fx, fy = g.forward
+            if abs(fx) < 1e-6 and abs(fy) < 1e-6:
+                fx, fy = uy, -ux
             arrow_len = 0.6 * L
-            tail_x = int(mx - uy * arrow_len / 2)
-            tail_y = int(my + ux * arrow_len / 2)
-            head_x = int(mx + uy * arrow_len / 2)
-            head_y = int(my - ux * arrow_len / 2)
+            tail_x = int(mx - fx * arrow_len / 2)
+            tail_y = int(my - fy * arrow_len / 2)
+            head_x = int(mx + fx * arrow_len / 2)
+            head_y = int(my + fy * arrow_len / 2)
             cv2.arrowedLine(img, (tail_x, tail_y), (head_x, head_y),
                             (0, 200, 255), 2, tipLength=0.3)
         label = f"G{i}"

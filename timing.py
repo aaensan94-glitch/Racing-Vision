@@ -133,13 +133,15 @@ class LapTracker:
             return None
         last_g0_t = gate0_times.max()
         cur = (cf[(cf["t"] >= last_g0_t) & (cf["gate"] > 0)]
+               .drop_duplicates(subset=["gate"], keep="last")
                .set_index("gate")["sector_s"])
         parts = []
         cum_delta = 0.0
-        for gate in sorted(cur.index):
+        for gate in sorted(cur.index.unique()):
             if gate not in best.index:
                 continue
-            cs, bs = cur.get(gate), best.get(gate)
+            cs = cur.at[gate] if gate in cur.index else float("nan")
+            bs = best.at[gate] if gate in best.index else float("nan")
             if pd.isna(cs) or pd.isna(bs):
                 continue
             d = cs - bs
