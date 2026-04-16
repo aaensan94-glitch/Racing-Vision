@@ -135,6 +135,8 @@ def main():
     trail_maxlen = TRAIL_LEN if TRAIL_LEN > 0 else None
     trails: Dict[str, Deque[Point]] = {
         name: deque(maxlen=trail_maxlen) for name in car_names}
+    lap_trail: Dict[str, List[Point]] = {name: [] for name in car_names}
+    best_trail: Dict[str, List[Point]] = {name: [] for name in car_names}
 
     cap = open_capture(source)
     actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -196,6 +198,12 @@ def main():
                                 ev = lap_tracker.on_forward_crossing(
                                     name, g.digit, t)
                                 if ev is not None and ev["lap_time_s"] is not None:
+                                    # Ist diese Runde die neue Bestzeit?
+                                    if ev["lap_time_s"] <= (
+                                            lap_tracker.best_lap_time(name)
+                                            or float("inf")):
+                                        best_trail[name] = lap_trail[name][:]
+                                    lap_trail[name].clear()
                                     print(f"\n[lap] {name} lap {ev['lap']} "
                                           f"time={ev['lap_time_s']:.3f}s "
                                           f"(best={lap_tracker.best_lap_time(name):.3f}s)")
@@ -203,6 +211,9 @@ def main():
                                     if tbl:
                                         print(tbl)
                                         print()
+                                elif ev is not None and ev["gate"] == 0:
+                                    # Gate 0 aber ungültige Runde → trotzdem reset
+                                    lap_trail[name].clear()
                                 elif ev is not None and ev["sector_s"] is not None:
                                     delta = lap_tracker.sector_delta(name)
                                     delta_s = f"  [{delta}]" if delta else ""
@@ -228,6 +239,7 @@ def main():
 
             if gp is not None:
                 trails[name].append(gp)
+                lap_trail[name].append(gp)
 
         # ----- Overlay -----
         if use_clahe:
@@ -249,11 +261,22 @@ def main():
                     bx, by = int(g.post_b[0]), int(g.post_b[1])
                     cv2.line(overlay, (ax, ay), (bx, by), (0, 255, 255), 5)
 
+        # Bahnen zeichnen: History + Best = 50% transparent, aktuelle Runde opak
+        trail_layer = overlay.copy()
         for name in car_names:
+            color = tracker.car(name).display_color_bgr()
             if len(trails[name]) >= 2:
-                draw_polyline(overlay, list(trails[name]),
-                              color=tracker.car(name).display_color_bgr(),
-                              thickness=1, closed=False)
+                draw_polyline(trail_layer, list(trails[name]),
+                              color=color, thickness=1, closed=False)
+            if len(best_trail[name]) >= 2:
+                draw_polyline(trail_layer, best_trail[name],
+                              color=color, thickness=3, closed=False)
+        cv2.addWeighted(trail_layer, 0.5, overlay, 0.5, 0, overlay)
+        for name in car_names:
+            color = tracker.car(name).display_color_bgr()
+            if len(lap_trail[name]) >= 2:
+                draw_polyline(overlay, lap_trail[name],
+                              color=color, thickness=3, closed=False)
 
         y_cursor = 30
         for name in car_names:
