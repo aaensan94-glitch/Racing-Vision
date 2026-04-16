@@ -169,6 +169,11 @@ def main():
         n: (0.0, -1) for n in car_names}
     GATE_DEBOUNCE_S = 0.5
     lap_tracker = LapTracker(car_names)
+    RACE_LAPS = 15
+    race_active = False
+    race_finished: Dict[str, bool] = {n: False for n in car_names}
+    countdown_t0: Optional[float] = None
+    countdown_beeps = 0
 
     while True:
         if not paused:
@@ -177,6 +182,34 @@ def main():
                 break
 
         t = time.time()
+
+        # ----- Countdown-Ampel -----
+        if countdown_t0 is not None:
+            elapsed = t - countdown_t0
+            beep_idx = int(elapsed)  # 0, 1, 2 = Vorbereitungstöne, 3 = GO
+            if beep_idx > countdown_beeps and countdown_beeps < 3:
+                sound.play()
+                countdown_beeps = beep_idx
+                print(f"[countdown] {3 - countdown_beeps}...")
+            if beep_idx >= 3 and countdown_beeps == 3:
+                # GO — Rennen starten
+                sound.play_finish()
+                countdown_beeps = 4
+                race_active = True
+                # Reset wie 'n' aber ohne Log (noch nichts da)
+                lap_tracker = LapTracker(car_names,
+                                         num_gates=lap_tracker.num_gates)
+                for tr in trails.values():
+                    tr.clear()
+                for name in car_names:
+                    lap_trail[name].clear()
+                    best_trail[name].clear()
+                    prev[name] = None
+                    speed[name] = 0.0
+                    last_gate_hit[name] = (0.0, -1)
+                    race_finished[name] = False
+                countdown_t0 = None
+                print(f"[race] GO! {RACE_LAPS} laps")
 
         positions = tracker.update(frame, t)
         global_positions: Dict[str, Optional[Point]] = dict(positions)
@@ -211,6 +244,17 @@ def main():
                                     if tbl:
                                         print(tbl)
                                         print()
+                                    # Ziel erreicht?
+                                    if (race_active
+                                            and lap_tracker.lap(name) >= RACE_LAPS
+                                            and not race_finished[name]):
+                                        race_finished[name] = True
+                                        sound.play_finish()
+                                        print(f"\n*** {name} FINISHED "
+                                              f"{RACE_LAPS} laps! ***")
+                                        if all(race_finished.values()):
+                                            race_active = False
+                                            print("\n=== RACE COMPLETE ===")
                                 elif ev is not None and ev["gate"] == 0:
                                     # Gate 0 aber ungültige Runde → trotzdem reset
                                     lap_trail[name].clear()
@@ -315,6 +359,22 @@ def main():
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1)
             y_cursor += 28
 
+        # Countdown / Race Overlay
+        if countdown_t0 is not None:
+            remaining = max(0, 3 - int(t - countdown_t0))
+            txt = str(remaining) if remaining > 0 else "GO!"
+            clr = (0, 0, 255) if remaining > 0 else (0, 255, 0)
+            (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 4, 8)
+            cx = (overlay.shape[1] - tw) // 2
+            cy = (overlay.shape[0] + th) // 2
+            cv2.putText(overlay, txt, (cx, cy),
+                        cv2.FONT_HERSHEY_SIMPLEX, 4, clr, 8, cv2.LINE_AA)
+        elif race_active:
+            laps_done = max(lap_tracker.lap(n) for n in car_names)
+            cv2.putText(overlay, f"Race: {laps_done}/{RACE_LAPS}",
+                        (overlay.shape[1] - 280, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
+
         fps_frames += 1
         now = time.time()
         if now - fps_last_t >= 0.5:
@@ -325,8 +385,8 @@ def main():
                     (overlay.shape[1] - 140, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-        keys_help = ("p=pause  t=clear-trails  h=hsv  f=fullscreen  "
-                     "g=gates  G=debug  e=clahe  q=quit")
+        keys_help = ("s=start  n=new-race  p=pause  t=clear-trails  "
+                     "h=hsv  f=fullscreen  g=gates  G=debug  e=clahe  q=quit")
         if source == "sim":
             keys_help += "  r=reverse  Up/Dn=speed"
         cv2.putText(overlay, keys_help,
@@ -345,10 +405,41 @@ def main():
             break
         elif key == ord("p"):
             paused = not paused
+        elif key == ord("n"):
+            # Log speichern bevor Reset
+            events_df = lap_tracker.to_dataframe()
+            if not events_df.empty:
+                reset_ts = time.strftime("%Y%m%d_%H%M%S")
+                ev_path = os.path.join(LOGS_DIR, f"gates_{reset_ts}.csv")
+                events_df.to_csv(ev_path, index=False)
+                summary = lap_tracker.summary()
+                sum_path = os.path.join(LOGS_DIR, f"laps_{reset_ts}.csv")
+                summary.to_csv(sum_path, index=False)
+                print(f"[reset] saved {ev_path}")
+                print(summary.to_string(index=False))
+            # Timing + Trails reset, Gates bleiben
+            lap_tracker = LapTracker(car_names, num_gates=lap_tracker.num_gates)
+            for tr in trails.values():
+                tr.clear()
+            for name in car_names:
+                lap_trail[name].clear()
+                best_trail[name].clear()
+                prev[name] = None
+                speed[name] = 0.0
+                last_gate_hit[name] = (0.0, -1)
+            print("[reset] new race — gates kept")
         elif key == ord("t"):
             for tr in trails.values():
                 tr.clear()
             print("[cleared] trails")
+        elif key == ord("s"):
+            if gates:
+                countdown_t0 = time.time()
+                countdown_beeps = 0
+                print("[countdown] 3...")
+                sound.play()
+            else:
+                print("[start] detect gates first (g)")
         elif key == ord("e"):
             use_clahe = not use_clahe
             print(f"[clahe] {'ON' if use_clahe else 'OFF'}")

@@ -12,9 +12,13 @@ FREQ_HZ = 1200
 ALARM_DURATION_S = 0.18
 ALARM_FREQ_HZ = 220  # tief + Square → kratzig
 
+FINISH_DURATION_S = 0.5
+FINISH_FREQ_HZ = 1600
+
 _proc: Optional[subprocess.Popen] = None
 _click_bytes: Optional[bytes] = None
 _alarm_bytes: Optional[bytes] = None
+_finish_bytes: Optional[bytes] = None
 
 
 def _build_click() -> bytes:
@@ -38,12 +42,22 @@ def _build_alarm() -> bytes:
     return pcm.tobytes()
 
 
+def _build_finish() -> bytes:
+    n = int(SAMPLE_RATE * FINISH_DURATION_S)
+    t = np.arange(n) / SAMPLE_RATE
+    env = np.minimum(1.0, t * 20.0) * np.exp(-t * 3.0)
+    wave = np.sin(2 * np.pi * FINISH_FREQ_HZ * t) * env
+    pcm = (wave * 32767 * 0.7).astype(np.int16)
+    return pcm.tobytes()
+
+
 def _open() -> None:
-    global _proc, _click_bytes, _alarm_bytes
+    global _proc, _click_bytes, _alarm_bytes, _finish_bytes
     if _proc is not None:
         return
     _click_bytes = _build_click()
     _alarm_bytes = _build_alarm()
+    _finish_bytes = _build_finish()
     if shutil.which("pw-cat"):
         cmd = ["pw-cat", "--playback", "-",
                "--rate", str(SAMPLE_RATE),
@@ -85,3 +99,9 @@ def play_alarm() -> None:
     if _proc is None:
         _open()
     _write(_alarm_bytes)
+
+
+def play_finish() -> None:
+    if _proc is None:
+        _open()
+    _write(_finish_bytes)
