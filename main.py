@@ -353,6 +353,14 @@ def main():
                         for g in ordered))
                     for w in warns:
                         print(f"[gates] WARN {w}")
+                    if ordered:
+                        gates = ordered
+                        n = max(g.digit for g in ordered) + 1
+                        lap_tracker.num_gates = n
+                        for name in car_names:
+                            lap_tracker._state[name].expected = 0
+                        print(f"[gates] using {n} ordered gates, "
+                              f"timing reset")
                 panel = build_crops_panel(frame, gates)
                 cv2.imshow("Gate Crops", panel)
         elif key == ord("G"):
