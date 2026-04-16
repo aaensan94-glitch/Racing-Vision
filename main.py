@@ -11,10 +11,30 @@ from vision import MultiTracker
 from gates import (detect_gates, draw_gates, build_crops_panel,
                    classify_gate_digit, order_gates, gate_crossed,
                    GateCandidate)
+from geometry import segment_intersection, catmull_rom
 from timing import LapTracker
 import sound
 
 Point = Tuple[float, float]
+
+
+def _trail_gate_xpt(prev_pt: Point, gp: Point, gate,
+                    trail_tail: List[Point]) -> Optional[Point]:
+    """Schnittpunkt der Fahrbahn (Spline oder gerade) mit der Gate-Linie."""
+    a, b = gate.post_a, gate.post_b
+    # Spline-Pfad wie in gate_crossed
+    if trail_tail is not None and len(trail_tail) >= 3:
+        p0 = trail_tail[-3]
+        p1 = trail_tail[-2]
+        p2 = trail_tail[-1]
+        p3 = (2 * gp[0] - prev_pt[0], 2 * gp[1] - prev_pt[1])
+        pts = catmull_rom(p0, p1, p2, p3, n=10)
+        for i in range(len(pts) - 1):
+            xpt = segment_intersection(pts[i], pts[i + 1], a, b)
+            if xpt is not None:
+                return xpt
+    # Fallback: gerade Linie
+    return segment_intersection(prev_pt, gp, a, b)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CFG_DIR = os.path.join(BASE_DIR, "configs")
@@ -31,14 +51,16 @@ def draw_polyline(img, pts: List[Point], color=(255, 255, 0), thickness=2,
                   closed=False):
     if pts is None or len(pts) < 2:
         return
-    from geometry import catmull_rom
     if len(pts) >= 4:
+        # Phantom-Punkte spiegeln damit Start/Ende auch Kurven werden
+        p_start = (2 * pts[0][0] - pts[1][0], 2 * pts[0][1] - pts[1][1])
+        p_end = (2 * pts[-1][0] - pts[-2][0], 2 * pts[-1][1] - pts[-2][1])
+        ext = [p_start] + list(pts) + [p_end]
         smooth: List[Point] = []
-        for i in range(1, len(pts) - 2):
-            smooth.extend(catmull_rom(pts[i - 1], pts[i], pts[i + 1],
-                                      pts[i + 2], n=6))
-        if smooth:
-            pts = smooth
+        for i in range(1, len(ext) - 2):
+            smooth.extend(catmull_rom(ext[i - 1], ext[i], ext[i + 1],
+                                      ext[i + 2], n=6))
+        pts = smooth
     p = np.array([[int(x), int(y)] for x, y in pts],
                  dtype=np.int32).reshape((-1, 1, 2))
     cv2.polylines(img, [p], isClosed=closed, color=color, thickness=thickness)
@@ -138,6 +160,7 @@ def main():
     lap_trail: Dict[str, List[Point]] = {name: [] for name in car_names}
     best_trail: Dict[str, List[Point]] = {name: [] for name in car_names}
 
+
     cap = open_capture(source)
     actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -206,6 +229,7 @@ def main():
                 for name in car_names:
                     lap_trail[name].clear()
                     best_trail[name].clear()
+
                     prev[name] = None
                     speed[name] = 0.0
                     last_gate_hit[name] = {}
@@ -236,12 +260,20 @@ def main():
                                 ev = lap_tracker.on_forward_crossing(
                                     name, g.digit, t)
                                 if ev is not None and ev["lap_time_s"] is not None:
+                                    # Schnittpunkt VOR clear berechnen
+                                    xpt = _trail_gate_xpt(
+                                        prev_pt, gp, g, trail_tail)
+                                    # Alten Trail bis zum Gate verlängern
+                                    if xpt is not None:
+                                        lap_trail[name].append(xpt)
                                     # Ist diese Runde die neue Bestzeit?
                                     if ev["lap_time_s"] <= (
                                             lap_tracker.best_lap_time(name)
                                             or float("inf")):
                                         best_trail[name] = lap_trail[name][:]
                                     lap_trail[name].clear()
+                                    if xpt is not None:
+                                        lap_trail[name].append(xpt)
                                     print(f"\n[lap] {name} lap {ev['lap']} "
                                           f"time={ev['lap_time_s']:.3f}s "
                                           f"(best={lap_tracker.best_lap_time(name):.3f}s)")
@@ -262,7 +294,13 @@ def main():
                                             print("\n=== RACE COMPLETE ===")
                                 elif ev is not None and ev["gate"] == 0:
                                     # Gate 0 aber ungültige Runde → trotzdem reset
+                                    xpt = _trail_gate_xpt(
+                                        prev_pt, gp, g, trail_tail)
+                                    if xpt is not None:
+                                        lap_trail[name].append(xpt)
                                     lap_trail[name].clear()
+                                    if xpt is not None:
+                                        lap_trail[name].append(xpt)
                                 elif ev is not None and ev["sector_s"] is not None:
                                     delta = lap_tracker.sector_delta(name)
                                     delta_s = f"  [{delta}]" if delta else ""

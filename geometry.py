@@ -1,5 +1,5 @@
 import math
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 Point = Tuple[float, float]
 
@@ -31,6 +31,20 @@ def side_of_line(p: Point, a: Point, b: Point) -> float:
     ax, ay = a
     bx, by = b
     return (bx - ax) * (py - ay) - (by - ay) * (px - ax)
+
+
+def segment_intersection(p1: Point, p2: Point, a: Point, b: Point) -> Optional[Point]:
+    """Intersection point of segments p1-p2 and a-b, or None."""
+    d1x, d1y = p2[0] - p1[0], p2[1] - p1[1]
+    d2x, d2y = b[0] - a[0], b[1] - a[1]
+    denom = d1x * d2y - d1y * d2x
+    if abs(denom) < 1e-12:
+        return None
+    t = ((a[0] - p1[0]) * d2y - (a[1] - p1[1]) * d2x) / denom
+    u = ((a[0] - p1[0]) * d1y - (a[1] - p1[1]) * d1x) / denom
+    if 0 <= t <= 1 and 0 <= u <= 1:
+        return (p1[0] + t * d1x, p1[1] + t * d1y)
+    return None
 
 
 def segments_intersect(p1: Point, p2: Point, a: Point, b: Point) -> bool:
