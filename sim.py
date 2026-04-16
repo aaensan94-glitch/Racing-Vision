@@ -121,18 +121,37 @@ def _build_background() -> np.ndarray:
 
 
 class SimCapture:
+    SPEED_FACTOR = 1.25  # Faktor pro Tastendruck
+
     def __init__(self):
         self._bg = _build_background()
         self._t0 = time.time()
         self._opened = True
         self._dir = -1  # -1 = Konventions-Vorwärts, +1 = Rückwärts (Test)
+        self._period = DOT_PERIOD_S
+
+    def _current_ang(self, now: float) -> float:
+        return self._dir * 2 * np.pi * ((now - self._t0) / self._period)
+
+    def _retune(self, new_period: float) -> None:
+        """Period ändern ohne Phasensprung."""
+        now = time.time()
+        ang = self._current_ang(now)
+        self._period = new_period
+        # t0 so setzen, dass ang bei neuer Period gleich bleibt
+        self._t0 = now - ang * self._period / (self._dir * 2 * np.pi)
 
     def reverse(self) -> None:
         """Fahrrichtung umkehren ohne Phasensprung am aktuellen Punkt."""
         now = time.time()
-        # ang = dir * 2π * (now - t0)/T  → dir flippen und t0 spiegeln, sodass ang gleich bleibt
         self._t0 = 2 * now - self._t0
         self._dir = -self._dir
+
+    def speed_up(self) -> None:
+        self._retune(self._period / self.SPEED_FACTOR)
+
+    def speed_down(self) -> None:
+        self._retune(self._period * self.SPEED_FACTOR)
 
     def isOpened(self) -> bool:
         return self._opened
@@ -142,7 +161,7 @@ class SimCapture:
             return False, None
         frame = self._bg.copy()
         t = time.time() - self._t0
-        ang = self._dir * 2 * np.pi * (t / DOT_PERIOD_S)
+        ang = self._dir * 2 * np.pi * (t / self._period)
         x = int(TRACK_CX + TRACK_R * np.cos(ang))
         y = int(TRACK_CY + TRACK_R * np.sin(ang))
         cv2.circle(frame, (x, y), DOT_R, DOT_BGR, -1)
