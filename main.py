@@ -211,14 +211,15 @@ def main():
         # ----- Countdown-Ampel -----
         if countdown_t0 is not None:
             elapsed = t - countdown_t0
-            beep_idx = int(elapsed)  # 0, 1, 2 = Vorbereitungstöne, 3 = GO
-            if beep_idx > countdown_beeps and countdown_beeps < 3:
-                sound.play()
-                countdown_beeps = beep_idx
-                print(f"[countdown] {3 - countdown_beeps}...")
-            if beep_idx >= 3 and countdown_beeps == 3:
+            # lit: 0s→1, 1s→2, 2s→3, 3s→GO
+            lit = min(int(elapsed) + 1, 4)
+            if lit <= 3 and lit > countdown_beeps:
+                sound.play_countdown()
+                countdown_beeps = lit
+                print(f"[countdown] {4 - lit}...")
+            if lit >= 4 and countdown_beeps < 4:
                 # GO — Rennen starten
-                sound.play_finish()
+                sound.play_go()
                 countdown_beeps = 4
                 race_active = True
                 # Reset wie 'n' aber ohne Log (noch nichts da)
@@ -256,9 +257,12 @@ def main():
                             last_gate_hit[name][gi] = t
                             last_gate_flash[name] = (t, gi)
                             if direction > 0:
-                                sound.play()
                                 ev = lap_tracker.on_forward_crossing(
                                     name, g.digit, t)
+                                if ev is not None and ev["lap_time_s"] is not None:
+                                    sound.play_triple()
+                                else:
+                                    sound.play()
                                 if ev is not None and ev["lap_time_s"] is not None:
                                     # Schnittpunkt VOR clear berechnen
                                     xpt = _trail_gate_xpt(
@@ -274,6 +278,9 @@ def main():
                                     lap_trail[name].clear()
                                     if xpt is not None:
                                         lap_trail[name].append(xpt)
+                                    lap_nr = lap_tracker.lap(name)
+                                    if not sound.tts_busy():
+                                        sound.say(f"{name} {lap_nr}")
                                     print(f"\n[lap] {name} lap {ev['lap']} "
                                           f"time={ev['lap_time_s']:.3f}s "
                                           f"(best={lap_tracker.best_lap_time(name):.3f}s)")
@@ -286,8 +293,22 @@ def main():
                                             and lap_tracker.lap(name) >= RACE_LAPS
                                             and not race_finished[name]):
                                         race_finished[name] = True
+                                        place = sum(race_finished.values())
                                         sound.play_finish()
+                                        bt = lap_tracker.best_lap_time(name)
+                                        bt_s = f"{bt:.1f} seconds" if bt else ""
+                                        if place == 1:
+                                            sound.say(
+                                                f"{name} wins! "
+                                                f"Best lap {bt_s}",
+                                                priority=True, speed=180)
+                                        else:
+                                            sound.say(
+                                                f"{name} finishes {place}nd. "
+                                                f"Best lap {bt_s}",
+                                                priority=True, speed=180)
                                         print(f"\n*** {name} FINISHED "
+                                              f"place {place} — "
                                               f"{RACE_LAPS} laps! ***")
                                         if all(race_finished.values()):
                                             race_active = False
@@ -404,14 +425,30 @@ def main():
 
         # Countdown / Race Overlay
         if countdown_t0 is not None:
-            remaining = max(0, 3 - int(t - countdown_t0))
-            txt = str(remaining) if remaining > 0 else "GO!"
-            clr = (0, 0, 255) if remaining > 0 else (0, 255, 0)
-            (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 4, 8)
-            cx = (overlay.shape[1] - tw) // 2
-            cy = (overlay.shape[0] + th) // 2
-            cv2.putText(overlay, txt, (cx, cy),
-                        cv2.FONT_HERSHEY_SIMPLEX, 4, clr, 8, cv2.LINE_AA)
+            lit = min(int(t - countdown_t0) + 1, 4)  # 1→2→3→4(GO)
+            # Ampel quer — 3 Lichter horizontal
+            lamp_r = 45
+            gap = 16
+            w_total = 3 * (2 * lamp_r) + 4 * gap
+            h_total = 2 * lamp_r + 2 * gap
+            cx = overlay.shape[1] // 2
+            cy = overlay.shape[0] // 2
+            x0 = cx - w_total // 2
+            y0 = cy - h_total // 2
+            cv2.rectangle(overlay, (x0, y0), (x0 + w_total, y0 + h_total),
+                          (20, 20, 20), -1)
+            cv2.rectangle(overlay, (x0, y0), (x0 + w_total, y0 + h_total),
+                          (60, 60, 60), 3)
+            for i in range(3):
+                lx = x0 + gap + lamp_r + i * (2 * lamp_r + gap)
+                if lit >= 4:
+                    color = (0, 200, 0)  # GO — alle grün
+                elif i < lit:
+                    color = (0, 0, 255)  # Rot an
+                else:
+                    color = (30, 30, 30)  # Aus
+                cv2.circle(overlay, (lx, cy), lamp_r, color, -1)
+                cv2.circle(overlay, (lx, cy), lamp_r, (60, 60, 60), 2)
         elif race_active:
             laps_done = max(lap_tracker.lap(n) for n in car_names)
             cv2.putText(overlay, f"Race: {laps_done}/{RACE_LAPS}",
@@ -480,8 +517,9 @@ def main():
             if gates:
                 countdown_t0 = time.time()
                 countdown_beeps = 0
+                sound.play_countdown()
+                countdown_beeps = 1
                 print("[countdown] 3...")
-                sound.play()
             else:
                 print("[start] detect gates first (g)")
         elif key == ord("e"):
