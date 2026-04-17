@@ -732,7 +732,7 @@ def main():
             help_lines: List[str] = []
             if source == "sim":
                 help_lines.append("r=reverse  Up/Down=speed")
-            help_lines.append("g=gates  k=kontrast  a=adjust  c=roi")
+            help_lines.append("g=gates  k=kontrast  a=adjust  c=roi (toggle)")
             help_lines.append(
                 "s=start  n=new-race  Left/Right=laps  p=pause  t=clear-trails")
             help_lines.append("f=fullscreen  i=hud  q=quit")
