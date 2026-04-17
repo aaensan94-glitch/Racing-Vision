@@ -1,12 +1,112 @@
 import os
 import json
+import threading
 import time
 import csv
 from collections import deque
+from contextlib import contextmanager
 from typing import Dict, Deque, List, Tuple, Optional
 
 import cv2
 import numpy as np
+
+
+class ThreadedCapture:
+    """Wrapper um cv2.VideoCapture: Hintergrund-Thread liest Frames so
+    schnell wie die Kamera liefert; read() kehrt sofort mit dem letzten
+    Frame zurück (evtl. dem gleichen wie beim vorherigen Aufruf).
+    frame_id() zählt hoch sobald ein neuer Frame eingegangen ist — damit
+    kann der Main-Loop Vision/Gate-Verarbeitung überspringen, wenn das
+    Bild unverändert ist."""
+
+    def __init__(self, cap: cv2.VideoCapture):
+        self._cap = cap
+        self._lock = threading.Lock()
+        self._frame: Optional[np.ndarray] = None
+        self._ok = False
+        self._frame_id = 0
+        self._running = True
+        self._thread = threading.Thread(target=self._worker, daemon=True)
+        self._thread.start()
+
+    def _worker(self) -> None:
+        while self._running:
+            ok, frame = self._cap.read()
+            with self._lock:
+                self._ok = ok
+                if ok and frame is not None:
+                    self._frame = frame
+                    self._frame_id += 1
+            if not ok:
+                time.sleep(0.02)
+
+    def read(self):
+        with self._lock:
+            if self._frame is None:
+                return False, None
+            return self._ok, self._frame
+
+    def frame_id(self) -> int:
+        with self._lock:
+            return self._frame_id
+
+    def isOpened(self) -> bool:
+        return self._cap.isOpened()
+
+    def get(self, prop):
+        return self._cap.get(prop)
+
+    def set(self, prop, val):
+        return self._cap.set(prop, val)
+
+    def release(self) -> None:
+        self._running = False
+        self._thread.join(timeout=1.0)
+        self._cap.release()
+
+
+class Perf:
+    """Block-Timer. Toggle mit 'd'. Druckt alle PRINT_EVERY Frames eine
+    Aufschlüsselung der akkumulierten Zeiten pro Label."""
+    PRINT_EVERY = 30
+
+    def __init__(self):
+        self.on = False
+        self.acc: Dict[str, float] = {}
+        self.n = 0
+
+    @contextmanager
+    def timed(self, label: str):
+        if not self.on:
+            yield
+            return
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.acc[label] = self.acc.get(label, 0.0) + (time.perf_counter() - t0)
+
+    def mark(self, label: str, dt: float) -> None:
+        if self.on:
+            self.acc[label] = self.acc.get(label, 0.0) + dt
+
+    def now(self) -> float:
+        return time.perf_counter() if self.on else 0.0
+
+    def tick(self):
+        if not self.on:
+            return
+        self.n += 1
+        if self.n < self.PRINT_EVERY:
+            return
+        avg_ms = sorted(
+            ((k, v / self.n * 1000) for k, v in self.acc.items()),
+            key=lambda kv: -kv[1])
+        total = sum(v for _, v in avg_ms)
+        parts = "  ".join(f"{k}={v:.1f}" for k, v in avg_ms)
+        print(f"[perf/{self.n}] total={total:.1f}ms  {parts}")
+        self.acc.clear()
+        self.n = 0
 
 from vision import MultiTracker
 from gates import (detect_gates, draw_gates, build_crops_panel,
@@ -253,10 +353,25 @@ def open_capture(source):
     cap = cv2.VideoCapture(source)
     if not cap.isOpened():
         raise RuntimeError(f"Could not open camera index {source}")
+    # MJPG vor Auflösung setzen, sonst bleibt YUYV → bei 1280x720 über USB
+    # langsam (typ. 126ms/frame statt ~33ms).
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
     cap.set(cv2.CAP_PROP_FPS, CAPTURE_FPS)
-    return cap
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    fcc = int(cap.get(cv2.CAP_PROP_FOURCC))
+    fcc_str = "".join(chr((fcc >> (8 * i)) & 0xFF) for i in range(4))
+    print(f"[capture] fourcc={fcc_str} fps={cap.get(cv2.CAP_PROP_FPS):.0f}")
+    wrapper = ThreadedCapture(cap)
+    # Warte auf ersten Frame, damit Main-Loop nicht sofort durch 'not ok' bricht.
+    t_wait0 = time.time()
+    while time.time() - t_wait0 < 2.0:
+        ok, _ = wrapper.read()
+        if ok:
+            break
+        time.sleep(0.02)
+    return wrapper
 
 
 def main():
@@ -366,12 +481,30 @@ def main():
     race_finished: Dict[str, bool] = {n: False for n in car_names}
     countdown_t0: Optional[float] = None
     countdown_beeps = 0
+    perf = Perf()
+    last_frame_id = -1
 
     while True:
-        if not paused:
-            ok, frame = cap.read()
-            if not ok:
-                break
+        pending_key = 255  # 255 = keine Taste
+        with perf.timed("capture"):
+            if not paused:
+                # Warte auf neuen Frame (ThreadedCapture): sonst würden wir
+                # schneller als die Kamera loopen, doppelt rendern und bei
+                # Adjust-Filtern zwischen gefiltert/ungefiltert flackern.
+                # Tasten in der Wartezeit puffern, damit sie der Haupt-Handler
+                # weiter unten verarbeiten kann.
+                if hasattr(cap, "frame_id"):
+                    while True:
+                        fid = cap.frame_id()
+                        if fid != last_frame_id:
+                            last_frame_id = fid
+                            break
+                        k = cv2.waitKey(1) & 0xFF
+                        if k != 255:
+                            pending_key = k
+                ok, frame = cap.read()
+                if not ok:
+                    break
 
         t = time.time()
 
@@ -406,28 +539,29 @@ def main():
                 countdown_t0 = None
                 print(f"[race] GO! {RACE_LAPS} laps")
 
-        if adjust_open:
-            for name, _d, _m in ADJUST_SLIDERS:
-                adjust_vals[name] = cv2.getTrackbarPos(name, ADJUST_WIN)
-        b = adjust_vals["Brightness"]
-        c_ = adjust_vals["Contrast"]
-        gm = adjust_vals["Gamma"]
-        sa = adjust_vals["Saturation"]
-        if (b, c_, gm, sa) != (100, 100, 100, 100):
-            alpha = c_ / 100.0
-            beta = float(b - 100)
-            frame = cv2.convertScaleAbs(frame, alpha=alpha, beta=beta)
-            gamma = max(0.1, gm / 100.0)
-            lut = np.clip((np.arange(256) / 255.0) ** (1.0 / gamma) * 255,
-                          0, 255).astype(np.uint8)
-            frame = cv2.LUT(frame, lut)
-            if sa != 100:
-                hsv_img = cv2.cvtColor(
-                    frame, cv2.COLOR_BGR2HSV).astype(np.int32)
-                hsv_img[..., 1] = np.clip(
-                    hsv_img[..., 1] * sa / 100, 0, 255)
-                frame = cv2.cvtColor(
-                    hsv_img.astype(np.uint8), cv2.COLOR_HSV2BGR)
+        with perf.timed("filter"):
+            if adjust_open:
+                for name, _d, _m in ADJUST_SLIDERS:
+                    adjust_vals[name] = cv2.getTrackbarPos(name, ADJUST_WIN)
+            b = adjust_vals["Brightness"]
+            c_ = adjust_vals["Contrast"]
+            gm = adjust_vals["Gamma"]
+            sa = adjust_vals["Saturation"]
+            if (b, c_, gm, sa) != (100, 100, 100, 100):
+                alpha = c_ / 100.0
+                beta = float(b - 100)
+                frame = cv2.convertScaleAbs(frame, alpha=alpha, beta=beta)
+                gamma = max(0.1, gm / 100.0)
+                lut = np.clip((np.arange(256) / 255.0) ** (1.0 / gamma) * 255,
+                              0, 255).astype(np.uint8)
+                frame = cv2.LUT(frame, lut)
+                if sa != 100:
+                    hsv_img = cv2.cvtColor(
+                        frame, cv2.COLOR_BGR2HSV).astype(np.int32)
+                    hsv_img[..., 1] = np.clip(
+                        hsv_img[..., 1] * sa / 100, 0, 255)
+                    frame = cv2.cvtColor(
+                        hsv_img.astype(np.uint8), cv2.COLOR_HSV2BGR)
         if adjust_open:
             hist_canvas = _make_histogram(frame, w=520)
             header = np.full((150, 520, 3), 30, dtype=np.uint8)
@@ -445,16 +579,19 @@ def main():
             canvas = np.vstack([header, hist_canvas])
             cv2.imshow(ADJUST_WIN, canvas)
 
-        roi_pts = mouse_state["roi_pts"]
-        if len(roi_pts) == 4:
-            mask = np.zeros(frame.shape[:2], dtype=np.uint8)
-            cv2.fillPoly(mask, [np.array(roi_pts, dtype=np.int32)], 255)
-            frame_proc = cv2.bitwise_and(frame, frame, mask=mask)
-        else:
-            frame_proc = frame
-        positions = tracker.update(frame_proc, t)
+        with perf.timed("roi"):
+            roi_pts = mouse_state["roi_pts"]
+            if len(roi_pts) == 4:
+                mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+                cv2.fillPoly(mask, [np.array(roi_pts, dtype=np.int32)], 255)
+                frame_proc = cv2.bitwise_and(frame, frame, mask=mask)
+            else:
+                frame_proc = frame
+        with perf.timed("vision"):
+            positions = tracker.update(frame_proc, t)
         global_positions: Dict[str, Optional[Point]] = dict(positions)
 
+        _t_gates = perf.now()
         for name in car_names:
             gp = global_positions[name]
 
@@ -564,8 +701,10 @@ def main():
             if gp is not None:
                 trails[name].append(gp)
                 lap_trail[name].append(gp)
+        perf.mark("gates+trail", perf.now() - _t_gates)
 
         # ----- Overlay -----
+        _t_overlay = perf.now()
         if use_clahe:
             from gates import _clahe
             lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
@@ -610,7 +749,10 @@ def main():
                         cv2.line(overlay, (int(sx), int(sy)),
                                  (int(ex), int(ey)), (0, 255, 0), 5)
 
+        perf.mark("overlay_base", perf.now() - _t_overlay)
+
         # Bahnen zeichnen: History + Best = 50% transparent, aktuelle Runde opak
+        _t_trails = perf.now()
         trail_layer = overlay.copy()
         for name in car_names:
             color = tracker.car(name).display_color_bgr()
@@ -626,7 +768,9 @@ def main():
             if len(lap_trail[name]) >= 2:
                 draw_polyline(overlay, lap_trail[name],
                               color=color, thickness=3, closed=False)
+        perf.mark("trails", perf.now() - _t_trails)
 
+        _t_hud = perf.now()
         # Per-Car Info als Block: erst sammeln, dann Panel + Text
         info_lines: List[Tuple[str, Tuple[int, int, int]]] = []
         for name in car_names:
@@ -803,17 +947,28 @@ def main():
                             hud.FONT, hud.scale, hud.color, hud.thickness,
                             cv2.LINE_AA)
                 py_cur += hud.line_h
+        perf.mark("hud", perf.now() - _t_hud)
 
-        cv2.imshow(WINDOW, overlay)
+        with perf.timed("imshow"):
+            cv2.imshow(WINDOW, overlay)
 
         for name in car_names:
             gp = global_positions[name]
             if gp is not None:
                 writer.writerow([t, name, gp[0], gp[1], speed[name]])
 
+        perf.tick()
+
         key = cv2.waitKey(1) & 0xFF
+        if key == 255 and pending_key != 255:
+            key = pending_key
         if key in (27, ord("q")):
             break
+        elif key == ord("d"):
+            perf.on = not perf.on
+            perf.acc.clear()
+            perf.n = 0
+            print(f"[perf] {'ON' if perf.on else 'OFF'}")
         elif key == ord("p"):
             paused = not paused
         elif key == ord("n"):

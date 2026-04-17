@@ -40,6 +40,13 @@ python main.py
 ```
 Beim Start wird eine Kamera-Liste angezeigt; `s` wählt den Simulator.
 
+## Licht
+Helligkeit beeinflusst die effektive Kamera-FPS: bei wenig Licht verlängert
+die Auto-Belichtung die Integrationszeit, die reale Frame-Rate sinkt auf
+10–15 fps. 1280×720 @ 30 fps über USB (MJPG) ist nur mit guter Beleuchtung
+erreichbar. Für konsistente Telemetrie: Tischlampe oder diffuses Oberlicht,
+keine harten Schatten über der Strecke.
+
 ## Bedienung
 Renn-Ablauf:
 - **g**: Gates kalibrieren (Kreise + Linien + Ziffern erkennen; speichert
