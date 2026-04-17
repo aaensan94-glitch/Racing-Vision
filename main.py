@@ -41,8 +41,60 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CFG_DIR = os.path.join(BASE_DIR, "configs")
 CARS_CFG_PATH = os.path.join(CFG_DIR, "cars.json")
 HUD_CFG_PATH = os.path.join(CFG_DIR, "hud.json")
+SESSION_CFG_PATH = os.path.join(CFG_DIR, "session.json")
+GATES_CFG_PATH = os.path.join(CFG_DIR, "gates.json")
 LOGS_DIR = os.path.join(BASE_DIR, "logs")
 os.makedirs(LOGS_DIR, exist_ok=True)
+
+
+def _load_session() -> dict:
+    try:
+        with open(SESSION_CFG_PATH) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_session(data: dict) -> None:
+    with open(SESSION_CFG_PATH, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def _load_gates() -> List["GateCandidate"]:
+    try:
+        with open(GATES_CFG_PATH) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+    return [GateCandidate(
+        post_a=tuple(g["post_a"]),
+        post_b=tuple(g["post_b"]),
+        radius_a=float(g["radius_a"]),
+        radius_b=float(g["radius_b"]),
+        line_p1=tuple(g["line_p1"]),
+        line_p2=tuple(g["line_p2"]),
+        digit=int(g.get("digit", -1)),
+        digit_confidence=float(g.get("digit_confidence", 0.0)),
+        digit_side=g.get("digit_side", ""),
+        forward=tuple(g.get("forward", [0.0, 0.0])),
+    ) for g in data]
+
+
+def _save_gates(gates: List["GateCandidate"]) -> None:
+    data = [{
+        "post_a": list(g.post_a),
+        "post_b": list(g.post_b),
+        "radius_a": g.radius_a,
+        "radius_b": g.radius_b,
+        "line_p1": list(g.line_p1),
+        "line_p2": list(g.line_p2),
+        "digit": g.digit,
+        "digit_confidence": g.digit_confidence,
+        "digit_side": g.digit_side,
+        "forward": list(g.forward),
+    } for g in gates]
+    with open(GATES_CFG_PATH, "w") as f:
+        json.dump(data, f, indent=2)
 
 
 class HudConfig:
@@ -234,9 +286,16 @@ def main():
         cv2.resizeWindow(WINDOW, DISPLAY_WIDTH, disp_h)
     fullscreen = False
 
+    session = _load_session()
+    saved_roi = session.get("roi_pts", [])
+    roi_pts_init: List[Tuple[int, int]] = [
+        (int(p[0]), int(p[1])) for p in saved_roi
+        if isinstance(p, (list, tuple)) and len(p) == 2
+    ] if len(saved_roi) == 4 else []
+
     mouse_state: Dict = {
         "x": -1, "y": -1,
-        "roi_pts": [],       # 4 Punkte des Polygons
+        "roi_pts": roi_pts_init,
         "roi_editing": False,
     }
 
@@ -259,7 +318,9 @@ def main():
     fps_last_t = time.time()
     fps_frames = 0
 
-    gates: List[GateCandidate] = []
+    gates: List[GateCandidate] = _load_gates()
+    if gates:
+        print(f"[session] loaded {len(gates)} gates from {GATES_CFG_PATH}")
     gate_circles = None
     gate_lines = None
     use_clahe = False
@@ -272,6 +333,11 @@ def main():
         ("Gamma", 100, 300),
         ("Saturation", 100, 300),
     ]
+    saved_adjust = session.get("adjust", {})
+    adjust_vals: Dict[str, int] = {
+        name: int(saved_adjust.get(name, default))
+        for name, default, _ in ADJUST_SLIDERS
+    }
     digit_classifier = None
     last_gate_hit: Dict[str, Dict[int, float]] = {
         n: {} for n in car_names}
@@ -279,7 +345,12 @@ def main():
         n: (0.0, -1) for n in car_names}
     GATE_DEBOUNCE_S = 0.3
     lap_tracker = LapTracker(car_names)
-    RACE_LAPS = 5
+    if gates:
+        valid_digits = [g.digit for g in gates if g.digit >= 0]
+        if valid_digits:
+            lap_tracker.num_gates = max(valid_digits) + 1
+    RACE_LAPS = int(session.get("lap_limit", 5))
+    RACE_LAPS = max(5, min(100, RACE_LAPS))
     race_active = False
     race_finished: Dict[str, bool] = {n: False for n in car_names}
     countdown_t0: Optional[float] = None
@@ -325,25 +396,28 @@ def main():
                 print(f"[race] GO! {RACE_LAPS} laps")
 
         if adjust_open:
-            b = cv2.getTrackbarPos("Brightness", ADJUST_WIN)
-            c_ = cv2.getTrackbarPos("Contrast", ADJUST_WIN)
-            gm = cv2.getTrackbarPos("Gamma", ADJUST_WIN)
-            sa = cv2.getTrackbarPos("Saturation", ADJUST_WIN)
-            if (b, c_, gm, sa) != (100, 100, 100, 100):
-                alpha = c_ / 100.0
-                beta = float(b - 100)
-                frame = cv2.convertScaleAbs(frame, alpha=alpha, beta=beta)
-                gamma = max(0.1, gm / 100.0)
-                lut = np.clip((np.arange(256) / 255.0) ** (1.0 / gamma) * 255,
-                              0, 255).astype(np.uint8)
-                frame = cv2.LUT(frame, lut)
-                if sa != 100:
-                    hsv_img = cv2.cvtColor(
-                        frame, cv2.COLOR_BGR2HSV).astype(np.int32)
-                    hsv_img[..., 1] = np.clip(
-                        hsv_img[..., 1] * sa / 100, 0, 255)
-                    frame = cv2.cvtColor(
-                        hsv_img.astype(np.uint8), cv2.COLOR_HSV2BGR)
+            for name, _d, _m in ADJUST_SLIDERS:
+                adjust_vals[name] = cv2.getTrackbarPos(name, ADJUST_WIN)
+        b = adjust_vals["Brightness"]
+        c_ = adjust_vals["Contrast"]
+        gm = adjust_vals["Gamma"]
+        sa = adjust_vals["Saturation"]
+        if (b, c_, gm, sa) != (100, 100, 100, 100):
+            alpha = c_ / 100.0
+            beta = float(b - 100)
+            frame = cv2.convertScaleAbs(frame, alpha=alpha, beta=beta)
+            gamma = max(0.1, gm / 100.0)
+            lut = np.clip((np.arange(256) / 255.0) ** (1.0 / gamma) * 255,
+                          0, 255).astype(np.uint8)
+            frame = cv2.LUT(frame, lut)
+            if sa != 100:
+                hsv_img = cv2.cvtColor(
+                    frame, cv2.COLOR_BGR2HSV).astype(np.int32)
+                hsv_img[..., 1] = np.clip(
+                    hsv_img[..., 1] * sa / 100, 0, 255)
+                frame = cv2.cvtColor(
+                    hsv_img.astype(np.uint8), cv2.COLOR_HSV2BGR)
+        if adjust_open:
             hist_canvas = _make_histogram(frame, w=520)
             header = np.full((150, 520, 3), 30, dtype=np.uint8)
             font = cv2.FONT_HERSHEY_SIMPLEX
@@ -779,9 +853,9 @@ def main():
             else:
                 cv2.namedWindow(ADJUST_WIN, cv2.WINDOW_NORMAL)
                 cv2.resizeWindow(ADJUST_WIN, 560, 520)
-                for name, default, maxv in ADJUST_SLIDERS:
-                    cv2.createTrackbar(name, ADJUST_WIN, default, maxv,
-                                       lambda _v: None)
+                for name, _default, maxv in ADJUST_SLIDERS:
+                    cv2.createTrackbar(name, ADJUST_WIN, adjust_vals[name],
+                                       maxv, lambda _v: None)
                 adjust_open = True
                 print("[adjust] ON — 100=neutral")
         elif key == ord("g"):
@@ -818,6 +892,9 @@ def main():
                               f"timing reset")
                 panel = build_crops_panel(frame, gates)
                 cv2.imshow("Gate Crops", panel)
+                if gates:
+                    _save_gates(gates)
+                    print(f"[session] saved {len(gates)} gates")
         elif key == ord("r"):
             if hasattr(cap, "reverse"):
                 cap.reverse()
@@ -840,6 +917,13 @@ def main():
                 WINDOW, cv2.WND_PROP_FULLSCREEN,
                 cv2.WINDOW_FULLSCREEN if fullscreen else cv2.WINDOW_NORMAL,
             )
+
+    _save_session({
+        "lap_limit": RACE_LAPS,
+        "roi_pts": [list(p) for p in mouse_state["roi_pts"]],
+        "adjust": adjust_vals,
+    })
+    print(f"[session] saved {SESSION_CFG_PATH}")
 
     log_f.close()
     cap.release()
