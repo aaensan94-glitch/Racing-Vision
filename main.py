@@ -484,16 +484,19 @@ def main():
                                     if xpt is not None:
                                         lap_trail[name].append(xpt)
                                     # Ist diese Runde die neue Bestzeit?
-                                    if ev["lap_time_s"] <= (
-                                            lap_tracker.best_lap_time(name)
-                                            or float("inf")):
+                                    is_new_best = ev["lap_time_s"] <= (
+                                        lap_tracker.best_lap_time(name)
+                                        or float("inf"))
+                                    if is_new_best:
                                         best_trail[name] = lap_trail[name][:]
                                     lap_trail[name].clear()
                                     if xpt is not None:
                                         lap_trail[name].append(xpt)
                                     lap_nr = lap_tracker.lap(name)
-                                    if not sound.tts_busy():
-                                        sound.say(f"{name} {lap_nr}")
+                                    msg = f"{name} {lap_nr}"
+                                    if is_new_best and lap_nr > 1:
+                                        msg += ", new best lap"
+                                    sound.say(msg, speed=180)
                                     print(f"\n[lap] {name} lap {ev['lap']} "
                                           f"time={ev['lap_time_s']:.3f}s "
                                           f"(best={lap_tracker.best_lap_time(name):.3f}s)")
