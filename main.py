@@ -41,28 +41,37 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CFG_DIR = os.path.join(BASE_DIR, "configs")
 CARS_CFG_PATH = os.path.join(CFG_DIR, "cars.json")
 HUD_CFG_PATH = os.path.join(CFG_DIR, "hud.json")
-SESSION_CFG_PATH = os.path.join(CFG_DIR, "session.json")
-GATES_CFG_PATH = os.path.join(CFG_DIR, "gates.json")
+def _source_suffix(source) -> str:
+    """Sim und Kamera getrennt — Positionen (Gates/ROI) und Filter sind inkompatibel."""
+    return "_sim" if source == "sim" else ""
+
+
+def _session_path(source) -> str:
+    return os.path.join(CFG_DIR, f"session{_source_suffix(source)}.json")
+
+
+def _gates_path(source) -> str:
+    return os.path.join(CFG_DIR, f"gates{_source_suffix(source)}.json")
 LOGS_DIR = os.path.join(BASE_DIR, "logs")
 os.makedirs(LOGS_DIR, exist_ok=True)
 
 
-def _load_session() -> dict:
+def _load_session(source) -> dict:
     try:
-        with open(SESSION_CFG_PATH) as f:
+        with open(_session_path(source)) as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
 
-def _save_session(data: dict) -> None:
-    with open(SESSION_CFG_PATH, "w") as f:
+def _save_session(data: dict, source) -> None:
+    with open(_session_path(source), "w") as f:
         json.dump(data, f, indent=2)
 
 
-def _load_gates() -> List["GateCandidate"]:
+def _load_gates(source) -> List["GateCandidate"]:
     try:
-        with open(GATES_CFG_PATH) as f:
+        with open(_gates_path(source)) as f:
             data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return []
@@ -80,7 +89,7 @@ def _load_gates() -> List["GateCandidate"]:
     ) for g in data]
 
 
-def _save_gates(gates: List["GateCandidate"]) -> None:
+def _save_gates(gates: List["GateCandidate"], source) -> None:
     data = [{
         "post_a": list(g.post_a),
         "post_b": list(g.post_b),
@@ -93,7 +102,7 @@ def _save_gates(gates: List["GateCandidate"]) -> None:
         "digit_side": g.digit_side,
         "forward": list(g.forward),
     } for g in gates]
-    with open(GATES_CFG_PATH, "w") as f:
+    with open(_gates_path(source), "w") as f:
         json.dump(data, f, indent=2)
 
 
@@ -286,7 +295,7 @@ def main():
         cv2.resizeWindow(WINDOW, DISPLAY_WIDTH, disp_h)
     fullscreen = False
 
-    session = _load_session()
+    session = _load_session(source)
     saved_roi = session.get("roi_pts", [])
     roi_pts_init: List[Tuple[int, int]] = [
         (int(p[0]), int(p[1])) for p in saved_roi
@@ -318,9 +327,9 @@ def main():
     fps_last_t = time.time()
     fps_frames = 0
 
-    gates: List[GateCandidate] = _load_gates()
+    gates: List[GateCandidate] = _load_gates(source)
     if gates:
-        print(f"[session] loaded {len(gates)} gates from {GATES_CFG_PATH}")
+        print(f"[session] loaded {len(gates)} gates from {_gates_path(source)}")
     gate_circles = None
     gate_lines = None
     use_clahe = False
@@ -893,8 +902,8 @@ def main():
                 panel = build_crops_panel(frame, gates)
                 cv2.imshow("Gate Crops", panel)
                 if gates:
-                    _save_gates(gates)
-                    print(f"[session] saved {len(gates)} gates")
+                    _save_gates(gates, source)
+                    print(f"[session] saved {len(gates)} gates → {_gates_path(source)}")
         elif key == ord("r"):
             if hasattr(cap, "reverse"):
                 cap.reverse()
@@ -922,8 +931,8 @@ def main():
         "lap_limit": RACE_LAPS,
         "roi_pts": [list(p) for p in mouse_state["roi_pts"]],
         "adjust": adjust_vals,
-    })
-    print(f"[session] saved {SESSION_CFG_PATH}")
+    }, source)
+    print(f"[session] saved {_session_path(source)}")
 
     log_f.close()
     cap.release()

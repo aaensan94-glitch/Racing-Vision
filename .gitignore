@@ -213,5 +213,5 @@ logs/*.csv
 cspell.json
 data/
 models/*.pt
-configs/session.json
-configs/gates.json
+configs/session*.json
+configs/gates*.json
