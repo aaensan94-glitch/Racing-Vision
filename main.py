@@ -492,7 +492,9 @@ def main():
         else:
             print("[modes] v4l2-ctl fehlt oder keine Modi gefunden — "
                   "nutze Default 1280x720@30")
-    current_mode: Optional[CamMode] = race_mode
+    # Start in Kalibrierungs-Modus (höchste Auflösung) — Gates kalibrieren,
+    # dann per 'h' runter in Race-Modus.
+    current_mode: Optional[CamMode] = cal_mode or race_mode
     cap = open_capture(source, current_mode)
     actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -591,6 +593,9 @@ def main():
         n: (0.0, -1) for n in car_names}
     GATE_DEBOUNCE_S = 0.3
     lap_tracker = LapTracker(car_names)
+    # Pro Fahrzeug: True ab dem ersten Gate-0-Crossing. Damit unterscheiden
+    # wir das Start-Crossing (leise) vom späteren Messed-up-Reset.
+    armed_before: Dict[str, bool] = {n: False for n in car_names}
     if gates:
         valid_digits = [g.digit for g in gates if g.digit >= 0]
         if valid_digits:
@@ -656,6 +661,7 @@ def main():
                     last_gate_hit[name] = {}
                     last_gate_flash[name] = (0.0, -1)
                     race_finished[name] = False
+                    armed_before[name] = False
                 countdown_t0 = None
                 print(f"[race] GO! {RACE_LAPS} laps")
 
@@ -727,6 +733,9 @@ def main():
                             last_gate_hit[name][gi] = t
                             last_gate_flash[name] = (t, gi)
                             if direction > 0:
+                                was_armed = armed_before[name]
+                                if g.digit == 0:
+                                    armed_before[name] = True
                                 ev = lap_tracker.on_forward_crossing(
                                     name, g.digit, t)
                                 if ev is not None and ev["lap_time_s"] is not None:
@@ -787,7 +796,9 @@ def main():
                                             race_active = False
                                             print("\n=== RACE COMPLETE ===")
                                 elif ev is not None and ev["gate"] == 0:
-                                    # Gate 0 aber ungültige Runde → trotzdem reset
+                                    # Gate 0 aber ungültige Runde → trotzdem reset.
+                                    # was_armed=False ist die allererste Start-
+                                    # Überquerung — dann keine Audio-Ansage.
                                     xpt = _trail_gate_xpt(
                                         prev_pt, gp, g, trail_tail)
                                     if xpt is not None:
@@ -795,6 +806,9 @@ def main():
                                     lap_trail[name].clear()
                                     if xpt is not None:
                                         lap_trail[name].append(xpt)
+                                    if was_armed:
+                                        sound.say(f"{name}, you messed up",
+                                                  speed=180)
                                 elif ev is not None and ev["sector_s"] is not None:
                                     delta = lap_tracker.sector_delta(name)
                                     delta_s = f"  [{delta}]" if delta else ""
@@ -1119,7 +1133,8 @@ def main():
                 summary.to_csv(sum_path, index=False)
                 print(f"[reset] saved {ev_path}")
                 print(summary.to_string(index=False))
-            # Timing + Trails reset, Gates bleiben
+            # Timing + Trails reset, Gates bleiben. Auch Race-Status zurück,
+            # damit Left/Right-Rundenlimit wieder funktioniert.
             lap_tracker = LapTracker(car_names, num_gates=lap_tracker.num_gates)
             for tr in trails.values():
                 tr.clear()
@@ -1130,6 +1145,11 @@ def main():
                 speed[name] = 0.0
                 last_gate_hit[name] = {}
                 last_gate_flash[name] = (0.0, -1)
+                race_finished[name] = False
+                armed_before[name] = False
+            race_active = False
+            countdown_t0 = None
+            countdown_beeps = 0
             print("[reset] new race — gates kept")
         elif key == ord("t"):
             for tr in trails.values():
