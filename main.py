@@ -756,13 +756,13 @@ def main():
                             cv2.LINE_AA)
                 hy += hud.line_h
 
-        # Picker folgt Maus solange sie sich bewegt; nach 0.8s Inaktivität
-        # (oder wenn Maus das Fenster verlässt) springt das Panel zurück nach
-        # unten-rechts.
+        # Picker folgt Maus; nach 10s Inaktivität (oder Maus außerhalb)
+        # wird das Panel ausgeblendet.
         mx, my = mouse_state["x"], mouse_state["y"]
         F_H, F_W = frame.shape[:2]
-        if show_hud and 0 <= mx < F_W and 0 <= my < F_H:
-            mouse_active = (t - mouse_state["last_move_t"]) < 0.8
+        mouse_active = (t - mouse_state["last_move_t"]) < 10.0
+        if (show_hud and mouse_active
+                and 0 <= mx < F_W and 0 <= my < F_H):
             bgr = frame[my, mx]
             hsv_px = cv2.cvtColor(
                 np.array([[bgr]], dtype=np.uint8),
@@ -777,25 +777,18 @@ def main():
             sw = hud.line_h  # Farb-Swatch quadratisch, Schrifthöhe
             p_w = max(p_widths) + sw + 3 * hud.pad
             p_h = len(pick_lines) * hud.line_h + 2 * hud.pad
-            if mouse_active:
-                # Marker am Sample-Pixel
-                cv2.drawMarker(overlay, (mx, my), (255, 255, 255),
-                               cv2.MARKER_CROSS, 14, 1, cv2.LINE_AA)
-                cv2.circle(overlay, (mx, my), 6, (0, 0, 0), 1, cv2.LINE_AA)
-                # Panel rechts-unten vom Cursor, an Rändern flippen
-                off = 16
-                p_x = mx + off
-                p_y = my + off
-                if p_x + p_w > overlay.shape[1] - 6:
-                    p_x = mx - p_w - off
-                if p_y + p_h > overlay.shape[0] - 6:
-                    p_y = my - p_h - off
-                p_x = max(6, p_x)
-                p_y = max(6, p_y)
-            else:
-                # Home: unten-rechts
-                p_x = overlay.shape[1] - p_w - 10
-                p_y = overlay.shape[0] - p_h - 10
+            cv2.drawMarker(overlay, (mx, my), (255, 255, 255),
+                           cv2.MARKER_CROSS, 14, 1, cv2.LINE_AA)
+            cv2.circle(overlay, (mx, my), 6, (0, 0, 0), 1, cv2.LINE_AA)
+            off = 16
+            p_x = mx + off
+            p_y = my + off
+            if p_x + p_w > overlay.shape[1] - 6:
+                p_x = mx - p_w - off
+            if p_y + p_h > overlay.shape[0] - 6:
+                p_y = my - p_h - off
+            p_x = max(6, p_x)
+            p_y = max(6, p_y)
             _panel(overlay, p_x, p_y, p_w, p_h, hud.panel_alpha)
             sx0 = p_x + hud.pad
             sy0 = p_y + hud.pad
