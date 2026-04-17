@@ -63,6 +63,10 @@ Bildverarbeitung:
   angewandt.
 - **c**: ROI als 4-Punkt-Polygon per Mausklick setzen. Erneuter Druck
   bricht ab / löscht.
+- **h**: Kamera-Modus toggeln (Race ↔ Kalibrierung). Beim Start werden
+  verfügbare Modi per `v4l2-ctl` ermittelt: Race = niedrigste Auflösung
+  mit max FPS (≤1280×720), Kalibrierung = höchste Auflösung. Gates und
+  ROI werden proportional skaliert, Trails gelöscht.
 
 Anzeige:
 - **p**: Pause.

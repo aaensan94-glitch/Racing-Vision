@@ -1,5 +1,7 @@
 import os
 import json
+import re
+import subprocess
 import threading
 import time
 import csv
@@ -169,13 +171,24 @@ def _save_session(data: dict, source) -> None:
         json.dump(data, f, indent=2)
 
 
-def _load_gates(source) -> List["GateCandidate"]:
+def _load_gates(
+    source,
+) -> Tuple[List["GateCandidate"], Optional[Tuple[int, int]]]:
+    """Gates + Auflösung zum Zeitpunkt des Speicherns (für Rescale)."""
     try:
         with open(_gates_path(source)) as f:
-            data = json.load(f)
+            raw = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        return []
-    return [GateCandidate(
+        return [], None
+    # Altes Format: bare Liste. Neues Format: Dict mit resolution+gates.
+    if isinstance(raw, list):
+        data = raw
+        res = None
+    else:
+        data = raw.get("gates", [])
+        r = raw.get("resolution")
+        res = (int(r[0]), int(r[1])) if r and len(r) == 2 else None
+    gates = [GateCandidate(
         post_a=tuple(g["post_a"]),
         post_b=tuple(g["post_b"]),
         radius_a=float(g["radius_a"]),
@@ -187,9 +200,11 @@ def _load_gates(source) -> List["GateCandidate"]:
         digit_side=g.get("digit_side", ""),
         forward=tuple(g.get("forward", [0.0, 0.0])),
     ) for g in data]
+    return gates, res
 
 
-def _save_gates(gates: List["GateCandidate"], source) -> None:
+def _save_gates(gates: List["GateCandidate"], source,
+                resolution: Optional[Tuple[int, int]] = None) -> None:
     data = [{
         "post_a": list(g.post_a),
         "post_b": list(g.post_b),
@@ -202,8 +217,11 @@ def _save_gates(gates: List["GateCandidate"], source) -> None:
         "digit_side": g.digit_side,
         "forward": list(g.forward),
     } for g in gates]
+    payload = {"gates": data}
+    if resolution is not None:
+        payload["resolution"] = [int(resolution[0]), int(resolution[1])]
     with open(_gates_path(source), "w") as f:
-        json.dump(data, f, indent=2)
+        json.dump(payload, f, indent=2)
 
 
 class HudConfig:
@@ -345,7 +363,55 @@ def prompt_camera_choice():
         print("invalid choice, try again.")
 
 
-def open_capture(source):
+CamMode = Tuple[str, int, int, float]  # (fourcc, width, height, fps)
+
+
+def list_v4l2_modes(device_index: int) -> List[CamMode]:
+    """Parst v4l2-ctl --list-formats-ext. Leer falls v4l2-ctl fehlt."""
+    try:
+        out = subprocess.check_output(
+            ["v4l2-ctl", "--list-formats-ext",
+             "-d", f"/dev/video{device_index}"],
+            stderr=subprocess.DEVNULL, text=True, timeout=2.0)
+    except (FileNotFoundError, subprocess.CalledProcessError,
+            subprocess.TimeoutExpired):
+        return []
+    modes: List[CamMode] = []
+    cur_fmt = ""
+    cur_w = cur_h = 0
+    for raw in out.splitlines():
+        line = raw.strip()
+        m = re.match(r"\[\d+\]:\s*'(\w+)'", line)
+        if m:
+            cur_fmt = m.group(1)
+            continue
+        m = re.match(r"Size:\s*Discrete\s+(\d+)x(\d+)", line)
+        if m:
+            cur_w, cur_h = int(m.group(1)), int(m.group(2))
+            continue
+        m = re.match(r"Interval:\s*Discrete\s+[\d.]+s\s+\(([\d.]+)\s*fps\)",
+                     line)
+        if m and cur_fmt and cur_w:
+            modes.append((cur_fmt, cur_w, cur_h, float(m.group(1))))
+    return modes
+
+
+def pick_default_modes(
+    modes: List[CamMode],
+) -> Tuple[Optional[CamMode], Optional[CamMode]]:
+    """(race, calibration) aus Modi wählen. MJPG bevorzugt, sonst jede."""
+    mjpg = [m for m in modes if m[0] == "MJPG"] or modes
+    if not mjpg:
+        return None, None
+    # Race: höchste FPS bei ≤1280x720, dann größte Auflösung als Tiebreaker.
+    race_pool = [m for m in mjpg if m[1] <= 1280 and m[2] <= 720] or mjpg
+    race = max(race_pool, key=lambda m: (m[3], m[1] * m[2]))
+    # Kalibrierung: größte Auflösung, dann FPS als Tiebreaker.
+    cal = max(mjpg, key=lambda m: (m[1] * m[2], m[3]))
+    return race, cal
+
+
+def open_capture(source, mode: Optional[CamMode] = None):
     if source == "sim":
         from sim import SimCapture
         print("[capture] Simulation mode")
@@ -353,16 +419,21 @@ def open_capture(source):
     cap = cv2.VideoCapture(source)
     if not cap.isOpened():
         raise RuntimeError(f"Could not open camera index {source}")
+    fourcc, w, h, fps = mode or ("MJPG", CAPTURE_WIDTH, CAPTURE_HEIGHT,
+                                 float(CAPTURE_FPS))
     # MJPG vor Auflösung setzen, sonst bleibt YUYV → bei 1280x720 über USB
     # langsam (typ. 126ms/frame statt ~33ms).
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
-    cap.set(cv2.CAP_PROP_FPS, CAPTURE_FPS)
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+    cap.set(cv2.CAP_PROP_FPS, fps)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     fcc = int(cap.get(cv2.CAP_PROP_FOURCC))
     fcc_str = "".join(chr((fcc >> (8 * i)) & 0xFF) for i in range(4))
-    print(f"[capture] fourcc={fcc_str} fps={cap.get(cv2.CAP_PROP_FPS):.0f}")
+    aw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    ah = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    print(f"[capture] fourcc={fcc_str} {aw}x{ah} "
+          f"fps={cap.get(cv2.CAP_PROP_FPS):.0f}")
     wrapper = ThreadedCapture(cap)
     # Warte auf ersten Frame, damit Main-Loop nicht sofort durch 'not ok' bricht.
     t_wait0 = time.time()
@@ -372,6 +443,20 @@ def open_capture(source):
             break
         time.sleep(0.02)
     return wrapper
+
+
+def _scale_gates_and_roi(gates: List["GateCandidate"],
+                         roi_pts: List[Tuple[int, int]],
+                         sx: float, sy: float) -> List[Tuple[int, int]]:
+    """Skaliert Gates in-place und ROI-Punkte (neue Liste) bei Moduswechsel."""
+    for g in gates:
+        g.post_a = (g.post_a[0] * sx, g.post_a[1] * sy)
+        g.post_b = (g.post_b[0] * sx, g.post_b[1] * sy)
+        g.line_p1 = (g.line_p1[0] * sx, g.line_p1[1] * sy)
+        g.line_p2 = (g.line_p2[0] * sx, g.line_p2[1] * sy)
+        g.radius_a = g.radius_a * (sx + sy) * 0.5
+        g.radius_b = g.radius_b * (sx + sy) * 0.5
+    return [(int(p[0] * sx), int(p[1] * sy)) for p in roi_pts]
 
 
 def main():
@@ -393,7 +478,22 @@ def main():
     best_trail: Dict[str, List[Point]] = {name: [] for name in car_names}
 
 
-    cap = open_capture(source)
+    # Kamera-Modi abfragen; Race + Kalibrierungs-Modus auto-wählen.
+    race_mode: Optional[CamMode] = None
+    cal_mode: Optional[CamMode] = None
+    if isinstance(source, int):
+        available = list_v4l2_modes(source)
+        if available:
+            race_mode, cal_mode = pick_default_modes(available)
+            if race_mode:
+                print(f"[modes] race={race_mode[1]}x{race_mode[2]}@"
+                      f"{race_mode[3]:.0f}  cal={cal_mode[1]}x{cal_mode[2]}@"
+                      f"{cal_mode[3]:.0f} (toggle: h)")
+        else:
+            print("[modes] v4l2-ctl fehlt oder keine Modi gefunden — "
+                  "nutze Default 1280x720@30")
+    current_mode: Optional[CamMode] = race_mode
+    cap = open_capture(source, current_mode)
     actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     print(f"[capture] source={source} resolution={actual_w}x{actual_h}")
@@ -412,10 +512,22 @@ def main():
 
     session = _load_session(source)
     saved_roi = session.get("roi_pts", [])
+    saved_sess_res = session.get("resolution")
     roi_pts_init: List[Tuple[int, int]] = [
         (int(p[0]), int(p[1])) for p in saved_roi
         if isinstance(p, (list, tuple)) and len(p) == 2
     ] if len(saved_roi) == 4 else []
+    # ROI auf aktuelle Auflösung skalieren, falls beim Speichern eine andere
+    # Auflösung aktiv war (Mode-Toggle zwischen Sessions).
+    if (roi_pts_init and saved_sess_res and len(saved_sess_res) == 2
+            and actual_w > 0 and actual_h > 0):
+        osw, osh = int(saved_sess_res[0]), int(saved_sess_res[1])
+        if (osw, osh) != (actual_w, actual_h) and osw > 0 and osh > 0:
+            sx, sy = actual_w / osw, actual_h / osh
+            roi_pts_init = [(int(p[0] * sx), int(p[1] * sy))
+                            for p in roi_pts_init]
+            print(f"[session] roi rescaled {osw}x{osh} -> "
+                  f"{actual_w}x{actual_h}")
 
     mouse_state: Dict = {
         "x": -1, "y": -1,
@@ -444,9 +556,17 @@ def main():
     fps_last_t = time.time()
     fps_frames = 0
 
-    gates: List[GateCandidate] = _load_gates(source)
+    gates, saved_gates_res = _load_gates(source)
     if gates:
         print(f"[session] loaded {len(gates)} gates from {_gates_path(source)}")
+        if (saved_gates_res and actual_w > 0 and actual_h > 0
+                and saved_gates_res != (actual_w, actual_h)):
+            sx = actual_w / saved_gates_res[0]
+            sy = actual_h / saved_gates_res[1]
+            _scale_gates_and_roi(gates, [], sx, sy)
+            print(f"[session] gates rescaled "
+                  f"{saved_gates_res[0]}x{saved_gates_res[1]} -> "
+                  f"{actual_w}x{actual_h}")
     gate_circles = None
     gate_lines = None
     use_clahe = False
@@ -855,7 +975,14 @@ def main():
 
         # Top-Right: FPS + Laps/Race-Status
         if show_hud:
-            tr_lines: List[str] = [f"{fps:.1f} fps"]
+            if current_mode is not None:
+                tr_lines: List[str] = [
+                    f"{fps:.1f} fps  "
+                    f"{current_mode[1]}x{current_mode[2]}@"
+                    f"{current_mode[3]:.0f}"
+                ]
+            else:
+                tr_lines = [f"{fps:.1f} fps"]
             if race_active:
                 laps_done = max(lap_tracker.lap(n) for n in car_names)
                 tr_lines.append(f"Race {laps_done}/{RACE_LAPS}")
@@ -881,7 +1008,16 @@ def main():
             help_lines: List[str] = []
             if source == "sim":
                 help_lines.append("r=reverse  Up/Down=speed")
-            help_lines.append("g=gates  k=kontrast  a=adjust  c=roi (toggle)")
+            if (race_mode is not None and cal_mode is not None
+                    and race_mode != cal_mode):
+                other_mode = (cal_mode if current_mode == race_mode
+                              else race_mode)
+                h_hint = (f"h={other_mode[1]}x{other_mode[2]}@"
+                          f"{other_mode[3]:.0f}")
+            else:
+                h_hint = "h=hires"
+            help_lines.append(
+                f"g=gates  k=kontrast  a=adjust  c=roi  {h_hint}")
             help_lines.append(
                 "s=start  n=new-race  Left/Right=laps  p=pause  t=clear-trails")
             help_lines.append("f=fullscreen  i=hud  q=quit")
@@ -1073,8 +1209,38 @@ def main():
                               f"timing reset")
                 panel = build_crops_panel(frame, gates)
                 cv2.imshow("Gate Crops", panel)
-            _save_gates(gates, source)
+            cur_res = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                       int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+            _save_gates(gates, source, resolution=cur_res)
             print(f"[session] saved {len(gates)} gates → {_gates_path(source)}")
+        elif key == ord("h"):
+            if (isinstance(source, int) and race_mode is not None
+                    and cal_mode is not None and race_mode != cal_mode):
+                new_mode = cal_mode if current_mode == race_mode else race_mode
+                old_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                old_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                cap.release()
+                current_mode = new_mode
+                cap = open_capture(source, current_mode)
+                new_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                new_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                if old_w > 0 and old_h > 0 and (old_w, old_h) != (new_w, new_h):
+                    sx = new_w / old_w
+                    sy = new_h / old_h
+                    mouse_state["roi_pts"] = _scale_gates_and_roi(
+                        gates, mouse_state["roi_pts"], sx, sy)
+                    for tr in trails.values():
+                        tr.clear()
+                    for name in car_names:
+                        lap_trail[name].clear()
+                        best_trail[name].clear()
+                        prev[name] = None
+                last_frame_id = -1
+                label = "cal" if current_mode == cal_mode else "race"
+                print(f"[mode] {label} — {new_w}x{new_h}@"
+                      f"{current_mode[3]:.0f}")
+            else:
+                print("[mode] toggle not available (sim or no modes detected)")
         elif key == ord("r"):
             if hasattr(cap, "reverse"):
                 cap.reverse()
@@ -1098,10 +1264,13 @@ def main():
                 cv2.WINDOW_FULLSCREEN if fullscreen else cv2.WINDOW_NORMAL,
             )
 
+    final_res = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                 int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
     _save_session({
         "lap_limit": RACE_LAPS,
         "roi_pts": [list(p) for p in mouse_state["roi_pts"]],
         "adjust": adjust_vals,
+        "resolution": list(final_res),
     }, source)
     print(f"[session] saved {_session_path(source)}")
 

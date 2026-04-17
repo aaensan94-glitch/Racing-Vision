@@ -439,7 +439,7 @@ def draw_gates(img: np.ndarray, gates: List[GateCandidate]):
             tx = bx - tw // 2
             ty = by + th // 2
             cv2.putText(img, text, (tx, ty), font, scale,
-                        (0, 255, 255), thick, cv2.LINE_AA)
+                        (0, 0, 0), thick, cv2.LINE_AA)
         else:
             cv2.putText(img, f"G{i}", (mx + 5, my - 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2,
