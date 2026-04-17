@@ -64,6 +64,32 @@ WINDOW = "Race Vision CV1"
 paused = False
 
 
+def _make_histogram(bgr: np.ndarray, w: int = 420, h: int = 200) -> np.ndarray:
+    """BGR-Histogramm mit Achsenbeschriftung, passend zum Adjust-Fenster."""
+    canvas = np.full((h, w, 3), 30, dtype=np.uint8)
+    axis_y = h - 22
+    plot_h = axis_y - 10
+    channel_colors = [(255, 80, 80), (80, 255, 80), (80, 80, 255)]
+    for i, col in enumerate(channel_colors):
+        hist = cv2.calcHist([bgr], [i], None, [256], [0, 256]).flatten()
+        m = float(hist.max()) or 1.0
+        pts = np.zeros((256, 2), dtype=np.int32)
+        for x in range(256):
+            pts[x, 0] = int(x * (w - 1) / 255)
+            pts[x, 1] = axis_y - int(hist[x] / m * plot_h)
+        cv2.polylines(canvas, [pts.reshape(-1, 1, 2)], False, col, 1,
+                      cv2.LINE_AA)
+    cv2.line(canvas, (0, axis_y), (w, axis_y), (90, 90, 90), 1)
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    for val, lx in ((0, 2), (64, w // 4 - 8), (128, w // 2 - 12),
+                    (192, 3 * w // 4 - 12), (255, w - 32)):
+        cv2.line(canvas, (lx + 10, axis_y), (lx + 10, axis_y + 3),
+                 (120, 120, 120), 1)
+        cv2.putText(canvas, str(val), (lx, axis_y + 16), font, 0.4,
+                    (200, 200, 200), 1, cv2.LINE_AA)
+    return canvas
+
+
 def _panel(img, x: int, y: int, w: int, h: int, alpha: float = 0.6) -> None:
     """Dark translucent background so Text über hellem Papier lesbar bleibt."""
     H, W = img.shape[:2]
@@ -208,14 +234,26 @@ def main():
         cv2.resizeWindow(WINDOW, DISPLAY_WIDTH, disp_h)
     fullscreen = False
 
-    mouse_px: Dict[str, int] = {"x": -1, "y": -1}
+    mouse_state: Dict = {
+        "x": -1, "y": -1,
+        "roi_pts": [],       # 4 Punkte des Polygons
+        "roi_editing": False,
+    }
 
     def _on_mouse(event, x, y, flags, param):
         if event == cv2.EVENT_MOUSEMOVE:
             param["x"] = int(x)
             param["y"] = int(y)
+        elif event == cv2.EVENT_LBUTTONDOWN and param["roi_editing"]:
+            pts = param["roi_pts"]
+            if len(pts) < 4:
+                pts.append((int(x), int(y)))
+                print(f"[roi] point {len(pts)}/4: ({x},{y})")
+                if len(pts) == 4:
+                    param["roi_editing"] = False
+                    print("[roi] 4 points set — mask active")
 
-    cv2.setMouseCallback(WINDOW, _on_mouse, mouse_px)
+    cv2.setMouseCallback(WINDOW, _on_mouse, mouse_state)
 
     fps = 0.0
     fps_last_t = time.time()
@@ -226,6 +264,14 @@ def main():
     gate_lines = None
     use_clahe = False
     show_hud = True
+    adjust_open = False
+    ADJUST_WIN = "Image Adjust"
+    ADJUST_SLIDERS = [
+        ("Brightness", 100, 200),
+        ("Contrast", 100, 300),
+        ("Gamma", 100, 300),
+        ("Saturation", 100, 300),
+    ]
     digit_classifier = None
     last_gate_hit: Dict[str, Dict[int, float]] = {
         n: {} for n in car_names}
@@ -278,7 +324,50 @@ def main():
                 countdown_t0 = None
                 print(f"[race] GO! {RACE_LAPS} laps")
 
-        positions = tracker.update(frame, t)
+        if adjust_open:
+            b = cv2.getTrackbarPos("Brightness", ADJUST_WIN)
+            c_ = cv2.getTrackbarPos("Contrast", ADJUST_WIN)
+            gm = cv2.getTrackbarPos("Gamma", ADJUST_WIN)
+            sa = cv2.getTrackbarPos("Saturation", ADJUST_WIN)
+            if (b, c_, gm, sa) != (100, 100, 100, 100):
+                alpha = c_ / 100.0
+                beta = float(b - 100)
+                frame = cv2.convertScaleAbs(frame, alpha=alpha, beta=beta)
+                gamma = max(0.1, gm / 100.0)
+                lut = np.clip((np.arange(256) / 255.0) ** (1.0 / gamma) * 255,
+                              0, 255).astype(np.uint8)
+                frame = cv2.LUT(frame, lut)
+                if sa != 100:
+                    hsv_img = cv2.cvtColor(
+                        frame, cv2.COLOR_BGR2HSV).astype(np.int32)
+                    hsv_img[..., 1] = np.clip(
+                        hsv_img[..., 1] * sa / 100, 0, 255)
+                    frame = cv2.cvtColor(
+                        hsv_img.astype(np.uint8), cv2.COLOR_HSV2BGR)
+            hist_canvas = _make_histogram(frame, w=520)
+            header = np.full((150, 520, 3), 30, dtype=np.uint8)
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            cv2.putText(header, "Slider  (100 = neutral)", (14, 26),
+                        font, 0.7, (200, 200, 200), 2, cv2.LINE_AA)
+            labels = [("Brightness", b), ("Contrast", c_),
+                      ("Gamma", gm), ("Saturation", sa)]
+            y = 56
+            for lbl, val in labels:
+                col = (230, 230, 230) if val == 100 else (80, 200, 255)
+                cv2.putText(header, f"{lbl:<11s} {val:>3d}", (18, y),
+                            font, 0.7, col, 2, cv2.LINE_AA)
+                y += 24
+            canvas = np.vstack([header, hist_canvas])
+            cv2.imshow(ADJUST_WIN, canvas)
+
+        roi_pts = mouse_state["roi_pts"]
+        if len(roi_pts) == 4:
+            mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+            cv2.fillPoly(mask, [np.array(roi_pts, dtype=np.int32)], 255)
+            frame_proc = cv2.bitwise_and(frame, frame, mask=mask)
+        else:
+            frame_proc = frame
+        positions = tracker.update(frame_proc, t)
         global_positions: Dict[str, Optional[Point]] = dict(positions)
 
         for name in car_names:
@@ -396,6 +485,25 @@ def main():
             overlay = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
         else:
             overlay = frame.copy()
+
+        if roi_pts:
+            roi_color = (0, 200, 255)
+            for p in roi_pts:
+                cv2.circle(overlay, p, 6, roi_color, -1)
+            if len(roi_pts) == 4:
+                arr = np.array(roi_pts, dtype=np.int32).reshape((-1, 1, 2))
+                cv2.polylines(overlay, [arr], isClosed=True, color=roi_color,
+                              thickness=2)
+            elif len(roi_pts) >= 2:
+                for i in range(len(roi_pts) - 1):
+                    cv2.line(overlay, roi_pts[i], roi_pts[i + 1],
+                             roi_color, 2)
+            if mouse_state["roi_editing"] and roi_pts:
+                mx_live = mouse_state["x"]
+                my_live = mouse_state["y"]
+                if 0 <= mx_live < overlay.shape[1] and 0 <= my_live < overlay.shape[0]:
+                    cv2.line(overlay, roi_pts[-1], (mx_live, my_live),
+                             roi_color, 1)
 
         if gates:
             draw_gates(overlay, gates)
@@ -541,10 +649,10 @@ def main():
             help_lines: List[str] = []
             if source == "sim":
                 help_lines.append("r=reverse  Up/Down=speed")
+            help_lines.append("g=gates  e=clahe  a=adjust  c=roi")
             help_lines.append(
                 "s=start  n=new-race  Left/Right=laps  p=pause  t=clear-trails")
-            help_lines.append(
-                "f=fullscreen  g=gates  e=clahe  i=hud  q=quit")
+            help_lines.append("f=fullscreen  i=hud  q=quit")
             h_widths = [
                 cv2.getTextSize(t, hud.FONT, hud.scale, hud.thickness)[0][0]
                 for t in help_lines]
@@ -561,7 +669,7 @@ def main():
                 hy += hud.line_h
 
         # Bottom-Right: HSV-Picker an Mausposition
-        mx, my = mouse_px["x"], mouse_px["y"]
+        mx, my = mouse_state["x"], mouse_state["y"]
         F_H, F_W = frame.shape[:2]
         if show_hud and 0 <= mx < F_W and 0 <= my < F_H:
             bgr = frame[my, mx]
@@ -651,9 +759,34 @@ def main():
         elif key == ord("i"):
             show_hud = not show_hud
             print(f"[hud] {'ON' if show_hud else 'OFF'}")
+        elif key == ord("c"):
+            if mouse_state["roi_editing"]:
+                mouse_state["roi_editing"] = False
+                mouse_state["roi_pts"] = []
+                print("[roi] editing cancelled")
+            elif mouse_state["roi_pts"]:
+                mouse_state["roi_pts"] = []
+                print("[roi] cleared")
+            else:
+                mouse_state["roi_pts"] = []
+                mouse_state["roi_editing"] = True
+                print("[roi] click 4 corners (c to cancel)")
+        elif key == ord("a"):
+            if adjust_open:
+                cv2.destroyWindow(ADJUST_WIN)
+                adjust_open = False
+                print("[adjust] OFF")
+            else:
+                cv2.namedWindow(ADJUST_WIN, cv2.WINDOW_NORMAL)
+                cv2.resizeWindow(ADJUST_WIN, 560, 520)
+                for name, default, maxv in ADJUST_SLIDERS:
+                    cv2.createTrackbar(name, ADJUST_WIN, default, maxv,
+                                       lambda _v: None)
+                adjust_open = True
+                print("[adjust] ON — 100=neutral")
         elif key == ord("g"):
             gates, gate_circles, gate_lines = detect_gates(
-                frame, use_clahe=use_clahe)
+                frame_proc, use_clahe=use_clahe)
             print(f"[gates] circles={len(gate_circles)} "
                   f"lines={len(gate_lines)} gates={len(gates)}")
             if gates:
