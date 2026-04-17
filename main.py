@@ -901,9 +901,8 @@ def main():
                               f"timing reset")
                 panel = build_crops_panel(frame, gates)
                 cv2.imshow("Gate Crops", panel)
-                if gates:
-                    _save_gates(gates, source)
-                    print(f"[session] saved {len(gates)} gates → {_gates_path(source)}")
+            _save_gates(gates, source)
+            print(f"[session] saved {len(gates)} gates → {_gates_path(source)}")
         elif key == ord("r"):
             if hasattr(cap, "reverse"):
                 cap.reverse()
