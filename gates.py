@@ -402,17 +402,7 @@ def gate_crossed(prev: Point, curr: Point, gate: GateCandidate,
     return _check_segment(prev, curr, gate)
 
 
-def draw_gates(img: np.ndarray, gates: List[GateCandidate],
-               circles: np.ndarray = None, lines: np.ndarray = None,
-               show_candidates: bool = False):
-    if show_candidates:
-        if circles is not None:
-            for (x, y, r) in circles:
-                cv2.circle(img, (int(x), int(y)), int(r), (80, 80, 80), 1)
-        if lines is not None:
-            for (x1, y1, x2, y2) in lines:
-                cv2.line(img, (int(x1), int(y1)), (int(x2), int(y2)),
-                         (60, 60, 160), 1)
+def draw_gates(img: np.ndarray, gates: List[GateCandidate]):
     for i, g in enumerate(gates):
         ax, ay = int(g.post_a[0]), int(g.post_a[1])
         bx, by = int(g.post_b[0]), int(g.post_b[1])
@@ -427,7 +417,7 @@ def draw_gates(img: np.ndarray, gates: List[GateCandidate],
             sx, sy = ax + ux * g.radius_a, ay + uy * g.radius_a
             ex, ey = bx - ux * g.radius_b, by - uy * g.radius_b
             cv2.line(img, (int(sx), int(sy)), (int(ex), int(ey)),
-                     (0, 255, 0), 2)
+                     (0, 255, 255), 2)
             # Fahrrichtung: aus stabiler Gate-Rotation (gesetzt in classify_gate_digit),
             # Fallback auf (uy, -ux) wenn noch nicht klassifiziert
             fx, fy = g.forward
@@ -439,9 +429,18 @@ def draw_gates(img: np.ndarray, gates: List[GateCandidate],
             head_x = int(mx + fx * arrow_len / 2)
             head_y = int(my + fy * arrow_len / 2)
             cv2.arrowedLine(img, (tail_x, tail_y), (head_x, head_y),
-                            (0, 200, 255), 2, tipLength=0.3)
-        label = f"G{i}"
+                            (0, 255, 255), 2, tipLength=0.3)
         if g.digit >= 0:
-            label = f"#{g.digit} ({g.digit_confidence:.2f})"
-        cv2.putText(img, label, (mx + 5, my - 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            text = str(g.digit)
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            scale = max(0.6, g.radius_b / 20.0)
+            thick = 2
+            (tw, th), _ = cv2.getTextSize(text, font, scale, thick)
+            tx = bx - tw // 2
+            ty = by + th // 2
+            cv2.putText(img, text, (tx, ty), font, scale,
+                        (0, 255, 255), thick, cv2.LINE_AA)
+        else:
+            cv2.putText(img, f"G{i}", (mx + 5, my - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2,
+                        cv2.LINE_AA)

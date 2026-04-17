@@ -1,4 +1,5 @@
 import os
+import json
 import time
 import csv
 from collections import deque
@@ -39,8 +40,24 @@ def _trail_gate_xpt(prev_pt: Point, gp: Point, gate,
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CFG_DIR = os.path.join(BASE_DIR, "configs")
 CARS_CFG_PATH = os.path.join(CFG_DIR, "cars.json")
+HUD_CFG_PATH = os.path.join(CFG_DIR, "hud.json")
 LOGS_DIR = os.path.join(BASE_DIR, "logs")
 os.makedirs(LOGS_DIR, exist_ok=True)
+
+
+class HudConfig:
+    FONT = cv2.FONT_HERSHEY_SIMPLEX
+
+    def __init__(self, path: str):
+        with open(path) as f:
+            cfg = json.load(f)
+        self.scale: float = float(cfg["font_scale"])
+        self.thickness: int = int(cfg["font_thickness"])
+        self.line_h: int = int(cfg["line_height"])
+        self.pad: int = int(cfg["padding"])
+        c = cfg["text_color"]
+        self.color: Tuple[int, int, int] = (int(c[0]), int(c[1]), int(c[2]))
+        self.panel_alpha: float = float(cfg["panel_alpha"])
 
 WINDOW = "Race Vision CV1"
 
@@ -160,6 +177,7 @@ def main():
 
     source = prompt_camera_choice()
 
+    hud = HudConfig(HUD_CFG_PATH)
     tracker = MultiTracker.load(CARS_CFG_PATH)
     car_names = tracker.names()
 
@@ -190,6 +208,15 @@ def main():
         cv2.resizeWindow(WINDOW, DISPLAY_WIDTH, disp_h)
     fullscreen = False
 
+    mouse_px: Dict[str, int] = {"x": -1, "y": -1}
+
+    def _on_mouse(event, x, y, flags, param):
+        if event == cv2.EVENT_MOUSEMOVE:
+            param["x"] = int(x)
+            param["y"] = int(y)
+
+    cv2.setMouseCallback(WINDOW, _on_mouse, mouse_px)
+
     fps = 0.0
     fps_last_t = time.time()
     fps_frames = 0
@@ -197,8 +224,8 @@ def main():
     gates: List[GateCandidate] = []
     gate_circles = None
     gate_lines = None
-    show_gate_candidates = False
     use_clahe = False
+    show_hud = True
     digit_classifier = None
     last_gate_hit: Dict[str, Dict[int, float]] = {
         n: {} for n in car_names}
@@ -370,16 +397,22 @@ def main():
         else:
             overlay = frame.copy()
 
-        if gates or show_gate_candidates:
-            draw_gates(overlay, gates, gate_circles, gate_lines,
-                       show_candidates=show_gate_candidates)
+        if gates:
+            draw_gates(overlay, gates)
             for name in car_names:
                 t_hit, gi = last_gate_flash[name]
                 if gi >= 0 and (t - t_hit) < 0.4 and gi < len(gates):
                     g = gates[gi]
-                    ax, ay = int(g.post_a[0]), int(g.post_a[1])
-                    bx, by = int(g.post_b[0]), int(g.post_b[1])
-                    cv2.line(overlay, (ax, ay), (bx, by), (0, 255, 255), 5)
+                    ax, ay = float(g.post_a[0]), float(g.post_a[1])
+                    bx, by = float(g.post_b[0]), float(g.post_b[1])
+                    dx, dy = bx - ax, by - ay
+                    L = float(np.hypot(dx, dy))
+                    if L > g.radius_a + g.radius_b:
+                        ux, uy = dx / L, dy / L
+                        sx, sy = ax + ux * g.radius_a, ay + uy * g.radius_a
+                        ex, ey = bx - ux * g.radius_b, by - uy * g.radius_b
+                        cv2.line(overlay, (int(sx), int(sy)),
+                                 (int(ex), int(ey)), (0, 255, 0), 5)
 
         # Bahnen zeichnen: History + Best = 50% transparent, aktuelle Runde opak
         trail_layer = overlay.copy()
@@ -416,8 +449,8 @@ def main():
 
             pos_str = f"({int(gp[0])},{int(gp[1])})" if gp is not None else "none"
             hsv = tracker.hsv(name)
-            hsv_str = (f"H{hsv[0]:.0f} S{hsv[1]:.0f} V{hsv[2]:.0f}"
-                       if hsv is not None else "HSV=NA")
+            hsv_str = (f"HSV {hsv[0]:.0f} {hsv[1]:.0f} {hsv[2]:.0f}"
+                       if hsv is not None else "HSV --")
             info_lines.append(
                 (f"{name}  {hsv_str}  {pos_str}  {speed[name]:.0f}px/s",
                  color))
@@ -433,19 +466,18 @@ def main():
                 (f"  lap {lap}  cur {cur_s}s  last {last_s}s  best {best_s}s",
                  color))
 
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        scale = 0.55
-        line_h = 22
-        pad = 10
-        widths = [cv2.getTextSize(t, font, scale, 1)[0][0] for t, _ in info_lines]
-        panel_w = (max(widths) if widths else 0) + 2 * pad
-        panel_h = len(info_lines) * line_h + 2 * pad
-        _panel(overlay, 10, 10, panel_w, panel_h)
-        y_cursor = 10 + pad + line_h - 6
-        for text, col in info_lines:
-            cv2.putText(overlay, text, (10 + pad, y_cursor),
-                        font, scale, col, 1, cv2.LINE_AA)
-            y_cursor += line_h
+        if show_hud:
+            widths = [cv2.getTextSize(t, hud.FONT, hud.scale, hud.thickness)[0][0]
+                      for t, _ in info_lines]
+            panel_w = (max(widths) if widths else 0) + 2 * hud.pad
+            panel_h = len(info_lines) * hud.line_h + 2 * hud.pad
+            _panel(overlay, 10, 10, panel_w, panel_h, hud.panel_alpha)
+            y_cursor = 10 + hud.pad + hud.line_h - 10
+            for text, col in info_lines:
+                cv2.putText(overlay, text, (10 + hud.pad, y_cursor),
+                            hud.FONT, hud.scale, col, hud.thickness,
+                            cv2.LINE_AA)
+                y_cursor += hud.line_h
 
         # Countdown / Race Overlay
         if countdown_t0 is not None:
@@ -481,56 +513,88 @@ def main():
             fps_frames = 0
             fps_last_t = now
 
-        # Top-Right: FPS + Race-Status gemeinsames Panel
-        tr_lines: List[Tuple[str, Tuple[int, int, int]]] = [
-            (f"{fps:.1f} fps", (0, 255, 0))]
-        if race_active:
-            laps_done = max(lap_tracker.lap(n) for n in car_names)
-            tr_lines.append(
-                (f"Race {laps_done}/{RACE_LAPS}", (0, 200, 255)))
-        elif countdown_t0 is None:
-            tr_lines.append(
-                (f"Laps: {RACE_LAPS}  [<- ->]", (180, 180, 180)))
-        tr_font = cv2.FONT_HERSHEY_SIMPLEX
-        tr_scale = 0.6
-        tr_widths = [cv2.getTextSize(t, tr_font, tr_scale, 1)[0][0]
-                     for t, _ in tr_lines]
-        tr_pad = 10
-        tr_line_h = 24
-        tr_w = max(tr_widths) + 2 * tr_pad
-        tr_h = len(tr_lines) * tr_line_h + 2 * tr_pad
-        tr_x = overlay.shape[1] - tr_w - 10
-        tr_y = 10
-        _panel(overlay, tr_x, tr_y, tr_w, tr_h)
-        y = tr_y + tr_pad + tr_line_h - 6
-        for text, col in tr_lines:
-            cv2.putText(overlay, text, (tr_x + tr_pad, y),
-                        tr_font, tr_scale, col, 1, cv2.LINE_AA)
-            y += tr_line_h
+        # Top-Right: FPS + Laps/Race-Status
+        if show_hud:
+            tr_lines: List[str] = [f"{fps:.1f} fps"]
+            if race_active:
+                laps_done = max(lap_tracker.lap(n) for n in car_names)
+                tr_lines.append(f"Race {laps_done}/{RACE_LAPS}")
+            else:
+                tr_lines.append(f"Laps {RACE_LAPS}")
+            tr_widths = [
+                cv2.getTextSize(t, hud.FONT, hud.scale, hud.thickness)[0][0]
+                for t in tr_lines]
+            tr_w = max(tr_widths) + 2 * hud.pad
+            tr_h = len(tr_lines) * hud.line_h + 2 * hud.pad
+            tr_x = overlay.shape[1] - tr_w - 10
+            tr_y = 10
+            _panel(overlay, tr_x, tr_y, tr_w, tr_h, hud.panel_alpha)
+            tr_cursor = tr_y + hud.pad + hud.line_h - 10
+            for text in tr_lines:
+                cv2.putText(overlay, text, (tr_x + hud.pad, tr_cursor),
+                            hud.FONT, hud.scale, hud.color, hud.thickness,
+                            cv2.LINE_AA)
+                tr_cursor += hud.line_h
 
         # Bottom: Hilfe-Zeilen — gesplittet damit sie ins Fenster passen
-        help_lines = [
-            "s=start  n=new-race  p=pause  t=clear-trails  h=hsv",
-            "f=fullscreen  g=gates  G=debug  e=clahe  q=quit",
-        ]
-        if source == "sim":
-            help_lines.append("r=reverse  Up/Dn=speed")
-        h_font = cv2.FONT_HERSHEY_SIMPLEX
-        h_scale = 0.5
-        h_line_h = 20
-        h_pad = 8
-        h_widths = [cv2.getTextSize(t, h_font, h_scale, 1)[0][0]
-                    for t in help_lines]
-        h_w = max(h_widths) + 2 * h_pad
-        h_h = len(help_lines) * h_line_h + 2 * h_pad
-        h_x = 10
-        h_y = overlay.shape[0] - h_h - 10
-        _panel(overlay, h_x, h_y, h_w, h_h)
-        hy = h_y + h_pad + h_line_h - 5
-        for text in help_lines:
-            cv2.putText(overlay, text, (h_x + h_pad, hy),
-                        h_font, h_scale, (230, 230, 230), 1, cv2.LINE_AA)
-            hy += h_line_h
+        if show_hud:
+            help_lines: List[str] = []
+            if source == "sim":
+                help_lines.append("r=reverse  Up/Down=speed")
+            help_lines.append(
+                "s=start  n=new-race  Left/Right=laps  p=pause  t=clear-trails")
+            help_lines.append(
+                "f=fullscreen  g=gates  e=clahe  i=hud  q=quit")
+            h_widths = [
+                cv2.getTextSize(t, hud.FONT, hud.scale, hud.thickness)[0][0]
+                for t in help_lines]
+            h_w = max(h_widths) + 2 * hud.pad
+            h_h = len(help_lines) * hud.line_h + 2 * hud.pad
+            h_x = 10
+            h_y = overlay.shape[0] - h_h - 10
+            _panel(overlay, h_x, h_y, h_w, h_h, hud.panel_alpha)
+            hy = h_y + hud.pad + hud.line_h - 10
+            for text in help_lines:
+                cv2.putText(overlay, text, (h_x + hud.pad, hy),
+                            hud.FONT, hud.scale, hud.color, hud.thickness,
+                            cv2.LINE_AA)
+                hy += hud.line_h
+
+        # Bottom-Right: HSV-Picker an Mausposition
+        mx, my = mouse_px["x"], mouse_px["y"]
+        F_H, F_W = frame.shape[:2]
+        if show_hud and 0 <= mx < F_W and 0 <= my < F_H:
+            bgr = frame[my, mx]
+            hsv_px = cv2.cvtColor(
+                np.array([[bgr]], dtype=np.uint8),
+                cv2.COLOR_BGR2HSV)[0, 0]
+            pick_lines = [
+                f"({mx},{my})",
+                f"BGR {bgr[0]} {bgr[1]} {bgr[2]}",
+                f"HSV {hsv_px[0]} {hsv_px[1]} {hsv_px[2]}",
+            ]
+            p_widths = [
+                cv2.getTextSize(t, hud.FONT, hud.scale, hud.thickness)[0][0]
+                for t in pick_lines]
+            sw = hud.line_h  # Farb-Swatch quadratisch, Schrifthöhe
+            p_w = max(p_widths) + sw + 3 * hud.pad
+            p_h = len(pick_lines) * hud.line_h + 2 * hud.pad
+            p_x = overlay.shape[1] - p_w - 10
+            p_y = overlay.shape[0] - p_h - 10
+            _panel(overlay, p_x, p_y, p_w, p_h, hud.panel_alpha)
+            sx0 = p_x + hud.pad
+            sy0 = p_y + hud.pad
+            cv2.rectangle(overlay, (sx0, sy0), (sx0 + sw, sy0 + sw),
+                          (int(bgr[0]), int(bgr[1]), int(bgr[2])), -1)
+            cv2.rectangle(overlay, (sx0, sy0), (sx0 + sw, sy0 + sw),
+                          (80, 80, 80), 1)
+            py_cur = p_y + hud.pad + hud.line_h - 10
+            tx = sx0 + sw + hud.pad
+            for text in pick_lines:
+                cv2.putText(overlay, text, (tx, py_cur),
+                            hud.FONT, hud.scale, hud.color, hud.thickness,
+                            cv2.LINE_AA)
+                py_cur += hud.line_h
 
         cv2.imshow(WINDOW, overlay)
 
@@ -584,6 +648,9 @@ def main():
         elif key == ord("e"):
             use_clahe = not use_clahe
             print(f"[clahe] {'ON' if use_clahe else 'OFF'}")
+        elif key == ord("i"):
+            show_hud = not show_hud
+            print(f"[hud] {'ON' if show_hud else 'OFF'}")
         elif key == ord("g"):
             gates, gate_circles, gate_lines = detect_gates(
                 frame, use_clahe=use_clahe)
@@ -618,9 +685,6 @@ def main():
                               f"timing reset")
                 panel = build_crops_panel(frame, gates)
                 cv2.imshow("Gate Crops", panel)
-        elif key == ord("G"):
-            show_gate_candidates = not show_gate_candidates
-            print(f"[gates] show_candidates={show_gate_candidates}")
         elif key == ord("r"):
             if hasattr(cap, "reverse"):
                 cap.reverse()
@@ -643,19 +707,6 @@ def main():
                 WINDOW, cv2.WND_PROP_FULLSCREEN,
                 cv2.WINDOW_FULLSCREEN if fullscreen else cv2.WINDOW_NORMAL,
             )
-        elif key == ord("h"):
-            for name in car_names:
-                gp = global_positions[name]
-                if gp is None:
-                    continue
-                gx, gy = int(gp[0]), int(gp[1])
-                x0, y0 = max(0, gx - 10), max(0, gy - 10)
-                x1, y1 = min(frame.shape[1], gx + 10), min(frame.shape[0], gy + 10)
-                patch = frame[y0:y1, x0:x1]
-                hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
-                mean = hsv.reshape(-1, 3).mean(axis=0)
-                print(f"[HSV around {name}] "
-                      f"H={mean[0]:.1f}, S={mean[1]:.1f}, V={mean[2]:.1f}")
 
     log_f.close()
     cap.release()
