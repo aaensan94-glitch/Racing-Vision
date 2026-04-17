@@ -304,6 +304,7 @@ def main():
 
     mouse_state: Dict = {
         "x": -1, "y": -1,
+        "last_move_t": 0.0,
         "roi_pts": roi_pts_init,
         "roi_editing": False,
     }
@@ -312,6 +313,7 @@ def main():
         if event == cv2.EVENT_MOUSEMOVE:
             param["x"] = int(x)
             param["y"] = int(y)
+            param["last_move_t"] = time.time()
         elif event == cv2.EVENT_LBUTTONDOWN and param["roi_editing"]:
             pts = param["roi_pts"]
             if len(pts) < 4:
@@ -751,17 +753,19 @@ def main():
                             cv2.LINE_AA)
                 hy += hud.line_h
 
-        # Bottom-Right: HSV-Picker an Mausposition
+        # Picker folgt Maus solange sie sich bewegt; nach 0.8s Inaktivität
+        # (oder wenn Maus das Fenster verlässt) springt das Panel zurück nach
+        # unten-rechts.
         mx, my = mouse_state["x"], mouse_state["y"]
         F_H, F_W = frame.shape[:2]
         if show_hud and 0 <= mx < F_W and 0 <= my < F_H:
+            mouse_active = (t - mouse_state["last_move_t"]) < 0.8
             bgr = frame[my, mx]
             hsv_px = cv2.cvtColor(
                 np.array([[bgr]], dtype=np.uint8),
                 cv2.COLOR_BGR2HSV)[0, 0]
             pick_lines = [
                 f"({mx},{my})",
-                f"BGR {bgr[0]} {bgr[1]} {bgr[2]}",
                 f"HSV {hsv_px[0]} {hsv_px[1]} {hsv_px[2]}",
             ]
             p_widths = [
@@ -770,8 +774,25 @@ def main():
             sw = hud.line_h  # Farb-Swatch quadratisch, Schrifthöhe
             p_w = max(p_widths) + sw + 3 * hud.pad
             p_h = len(pick_lines) * hud.line_h + 2 * hud.pad
-            p_x = overlay.shape[1] - p_w - 10
-            p_y = overlay.shape[0] - p_h - 10
+            if mouse_active:
+                # Marker am Sample-Pixel
+                cv2.drawMarker(overlay, (mx, my), (255, 255, 255),
+                               cv2.MARKER_CROSS, 14, 1, cv2.LINE_AA)
+                cv2.circle(overlay, (mx, my), 6, (0, 0, 0), 1, cv2.LINE_AA)
+                # Panel rechts-unten vom Cursor, an Rändern flippen
+                off = 16
+                p_x = mx + off
+                p_y = my + off
+                if p_x + p_w > overlay.shape[1] - 6:
+                    p_x = mx - p_w - off
+                if p_y + p_h > overlay.shape[0] - 6:
+                    p_y = my - p_h - off
+                p_x = max(6, p_x)
+                p_y = max(6, p_y)
+            else:
+                # Home: unten-rechts
+                p_x = overlay.shape[1] - p_w - 10
+                p_y = overlay.shape[0] - p_h - 10
             _panel(overlay, p_x, p_y, p_w, p_h, hud.panel_alpha)
             sx0 = p_x + hud.pad
             sy0 = p_y + hud.pad
