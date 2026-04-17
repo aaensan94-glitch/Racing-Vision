@@ -723,7 +723,7 @@ def main():
             help_lines: List[str] = []
             if source == "sim":
                 help_lines.append("r=reverse  Up/Down=speed")
-            help_lines.append("g=gates  e=clahe  a=adjust  c=roi")
+            help_lines.append("g=gates  k=kontrast  a=adjust  c=roi")
             help_lines.append(
                 "s=start  n=new-race  Left/Right=laps  p=pause  t=clear-trails")
             help_lines.append("f=fullscreen  i=hud  q=quit")
@@ -827,7 +827,7 @@ def main():
                 print("[countdown] 3...")
             else:
                 print("[start] detect gates first (g)")
-        elif key == ord("e"):
+        elif key == ord("k"):
             use_clahe = not use_clahe
             print(f"[clahe] {'ON' if use_clahe else 'OFF'}")
         elif key == ord("i"):

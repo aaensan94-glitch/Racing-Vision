@@ -42,19 +42,27 @@ Beim Start wird eine Kamera-Liste angezeigt; `s` wählt den Simulator.
 
 ## Bedienung
 Renn-Ablauf:
-- **g**: Gates kalibrieren (Kreise + Linien + Ziffern erkennen).
+- **g**: Gates kalibrieren (Kreise + Linien + Ziffern erkennen; speichert
+  `configs/gates.json`).
 - **s**: Countdown starten (3 Beeps + GO, Ampel im Overlay).
 - **n**: Neues Rennen (Log speichern, Timing + Trails zurücksetzen, Gates
   bleiben).
 - **Left/Right**: Rundenlimit ± 5 (Min 5, Max 100) — nur vor dem Rennen.
 
+Bildverarbeitung:
+- **k**: CLAHE-Kontrastverstärkung.
+- **a**: Adjust-Fenster mit Slidern (Brightness/Contrast/Gamma/Saturation)
+  und Live-Histogramm. Werte werden persistiert und auch nach Schließen
+  angewandt.
+- **c**: ROI als 4-Punkt-Polygon per Mausklick setzen. Erneuter Druck
+  bricht ab / löscht.
+
 Anzeige:
 - **p**: Pause.
 - **t**: Gefahrene Spuren löschen.
 - **f**: Vollbild.
-- **e**: CLAHE-Kontrastverstärkung.
 - **i**: HUD (alle Panels) ein-/ausblenden.
-- **q / ESC**: Beenden.
+- **q / ESC**: Beenden (speichert Session).
 
 Simulator (nur wenn Quelle = Simulator):
 - **r**: Fahrtrichtung umkehren.
@@ -73,3 +81,7 @@ Simulator (nur wenn Quelle = Simulator):
 - `sim.py` — Simulator-Kamera (duck-typed `cv2.VideoCapture`).
 - `configs/cars.json` — HSV-Bereiche pro Fahrzeug.
 - `configs/hud.json` — HUD-Schrift, Linienhöhe, Padding, Panel-Alpha.
+- `configs/session.json` (auto, gitignored) — Rundenlimit, ROI-Polygon,
+  Filter-Werte. Beim Beenden geschrieben, beim Start geladen.
+- `configs/gates.json` (auto, gitignored) — persistierte Gate-Kalibrierung.
+  Wird nach `g` geschrieben, beim Start geladen.
