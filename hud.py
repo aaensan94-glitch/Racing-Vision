@@ -1,6 +1,6 @@
 import json
 from collections import deque
-from typing import Dict, Deque, List, Optional, Tuple
+from typing import Any, Dict, Deque, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -262,6 +262,94 @@ def draw_help_panel(overlay: np.ndarray, hud: HudConfig,
         cursor += hud.line_h
 
 
+def draw_roi_overlay(overlay: np.ndarray, roi_pts: List[Tuple[int, int]],
+                     editing: bool, mx: int, my: int) -> None:
+    """Draws the ROI polygon corners, edges, and rubber-band line onto the overlay.
+
+    Args:
+        overlay: BGR image to draw on (modified in place).
+        roi_pts: Current ROI corner points (0–4).
+        editing: Whether the user is currently placing ROI corners.
+        mx: Live mouse x coordinate for the rubber-band preview.
+        my: Live mouse y coordinate for the rubber-band preview.
+    """
+    if not roi_pts:
+        return
+    roi_color = (0, 200, 255)
+    for p in roi_pts:
+        cv2.circle(overlay, p, 6, roi_color, -1)       # corner dot
+    if len(roi_pts) == 4:
+        arr = np.array(roi_pts, dtype=np.int32).reshape((-1, 1, 2))
+        cv2.polylines(overlay, [arr], isClosed=True,
+                      color=roi_color, thickness=2)     # closed polygon
+    elif len(roi_pts) >= 2:
+        for i in range(len(roi_pts) - 1):
+            cv2.line(overlay, roi_pts[i], roi_pts[i + 1],
+                     roi_color, 2)                      # in-progress edges
+    if editing and roi_pts:
+        if 0 <= mx < overlay.shape[1] and 0 <= my < overlay.shape[0]:
+            cv2.line(overlay, roi_pts[-1], (mx, my),
+                     roi_color, 1)                      # rubber-band line to cursor
+
+
+def draw_gate_flash(overlay: np.ndarray, gates: list,
+                    last_gate_flash: Dict[str, Tuple[float, int]],
+                    car_names: List[str], t: float) -> None:
+    """Flashes a green line across the gate most recently crossed by each car.
+
+    The flash lasts 0.4 s. The line is clipped to the gate opening (excluding
+    post radii) so it does not overlap the post circles.
+
+    Args:
+        overlay: BGR image to draw on (modified in place).
+        gates: List of GateCandidate objects.
+        last_gate_flash: Per-car (timestamp, gate_index) of the last crossing.
+        car_names: Ordered list of car names.
+        t: Current timestamp.
+    """
+    for name in car_names:
+        t_hit, gi = last_gate_flash[name]
+        if gi < 0 or (t - t_hit) >= 0.4 or gi >= len(gates):
+            continue
+        g = gates[gi]
+        ax, ay = float(g.post_a[0]), float(g.post_a[1])
+        bx, by = float(g.post_b[0]), float(g.post_b[1])
+        dx, dy = bx - ax, by - ay
+        L = float(np.hypot(dx, dy))
+        if L <= g.radius_a + g.radius_b:
+            continue
+        ux, uy = dx / L, dy / L
+        sx, sy = ax + ux * g.radius_a, ay + uy * g.radius_a
+        ex, ey = bx - ux * g.radius_b, by - uy * g.radius_b
+        cv2.line(overlay, (int(sx), int(sy)),
+                 (int(ex), int(ey)), (0, 255, 0), 5)   # flash green on crossing
+
+
+def draw_adjust_window(frame: np.ndarray, adjust_vals: Dict[str, int],
+                       sliders: list, win_name: str) -> None:
+    """Renders the image-adjust window with a histogram and slider readout.
+
+    Args:
+        frame: Current (already adjusted) BGR frame used for the histogram.
+        adjust_vals: Current slider values keyed by slider name.
+        sliders: List of (name, neutral_value, max_value) slider definitions.
+        win_name: OpenCV window name to display into.
+    """
+    hist_canvas = _make_histogram(frame, w=520)
+    header = np.full((150, 520, 3), 30, dtype=np.uint8)
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    cv2.putText(header, "Slider  (100 = neutral)", (14, 26),
+                font, 0.7, (200, 200, 200), 2, cv2.LINE_AA)
+    y = 56
+    for lbl, neutral, _ in sliders:
+        val = adjust_vals[lbl]
+        col = (230, 230, 230) if val == neutral else (80, 200, 255)
+        cv2.putText(header, f"{lbl:<11s} {val:>3d}", (18, y),
+                    font, 0.7, col, 2, cv2.LINE_AA)
+        y += 24
+    cv2.imshow(win_name, np.vstack([header, hist_canvas]))  # display adjust window
+
+
 def draw_hsv_picker(overlay: np.ndarray, frame: np.ndarray,
                     mx: int, my: int, last_move_t: float,
                     now: float, hud: HudConfig) -> None:
@@ -313,3 +401,95 @@ def draw_hsv_picker(overlay: np.ndarray, frame: np.ndarray,
         cv2.putText(overlay, text, (tx, cursor),
                     hud.FONT, hud.scale, hud.color, hud.thickness, cv2.LINE_AA)
         cursor += hud.line_h
+
+
+def build_help_lines(source, race_mode, cal_mode, current_mode) -> List[str]:
+    """Builds the keyboard shortcut hint lines for the help panel.
+
+    Args:
+        source: Camera source; "sim" adds simulation-specific hints.
+        race_mode: Race CamMode, or None.
+        cal_mode: Calibration CamMode, or None.
+        current_mode: Currently active CamMode, or None.
+
+    Returns:
+        List of hint strings for draw_help_panel.
+    """
+    lines: List[str] = []
+    if source == "sim":
+        lines.append("r=reverse  Up/Down=speed")
+    if (race_mode is not None and cal_mode is not None
+            and race_mode != cal_mode):
+        other = cal_mode if current_mode == race_mode else race_mode
+        h_hint = f"h={other[1]}x{other[2]}@{other[3]:.0f}"
+    else:
+        h_hint = "h=hires"
+    lines += [
+        f"g=gates  k=contrast  a=adjust  c=roi  {h_hint}",
+        "s=start  n=new-race  Left/Right=laps  p=pause  t=clear-trails",
+        "f=fullscreen  i=hud  q=quit",
+    ]
+    return lines
+
+
+def draw_car_markers(
+    overlay: np.ndarray,
+    car_names: List[str],
+    global_positions: Dict[str, Optional[Tuple[float, float]]],
+    tracker: Any,
+    speed: Dict[str, float],
+    lap_tracker: Any,
+    t: float,
+    colors: Dict[str, Tuple[int, int, int]],
+) -> List[Tuple[str, Tuple[int, int, int]]]:
+    """Draws car blobs, position dots, and name labels onto the overlay.
+
+    Also builds and returns the HUD info lines for each car (position, HSV,
+    speed, lap times).
+
+    Args:
+        overlay: BGR frame drawn on in place.
+        car_names: Ordered list of car names.
+        global_positions: Latest (x, y) positions from the tracker, or None.
+        tracker: MultiTracker instance providing contour and HSV per car.
+        speed: Per-car speed in px/s.
+        lap_tracker: LapTracker with current race timing data.
+        t: Current timestamp in seconds.
+        colors: Per-car BGR display colors.
+
+    Returns:
+        List of (text, color) tuples for each car's info line pair.
+    """
+    info_lines: List[Tuple[str, Tuple[int, int, int]]] = []
+    for name in car_names:
+        color = colors[name]
+        gp = global_positions[name]
+
+        if gp is not None:
+            gx, gy = int(gp[0]), int(gp[1])
+            cnt = tracker.contour(name)
+            if cnt is not None:
+                cv2.drawContours(overlay, [cnt], -1, color, 1)  # car blob outline
+            cv2.circle(overlay, (gx, gy), 6, color, -1)         # car position dot
+            cv2.putText(overlay, name, (gx + 10, gy - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2,
+                        cv2.LINE_AA)                             # car name label
+
+        pos_str = f"({int(gp[0])},{int(gp[1])})" if gp is not None else "none"
+        hsv = tracker.hsv(name)
+        hsv_str = (f"HSV {hsv[0]:.0f} {hsv[1]:.0f} {hsv[2]:.0f}"
+                   if hsv is not None else "HSV --")
+        info_lines.append(
+            (f"{name}  {hsv_str}  {pos_str}  {speed[name]:.0f}px/s", color))
+
+        lap = lap_tracker.lap(name)
+        last = lap_tracker.last_lap_time(name)
+        best = lap_tracker.best_lap_time(name)
+        cur = lap_tracker.current_lap_elapsed(name, t)
+        last_s = f"{last:.3f}" if last is not None else "--"
+        best_s = f"{best:.3f}" if best is not None else "--"
+        cur_s = f"{cur:.2f}" if cur is not None else "--"
+        info_lines.append(
+            (f"  lap {lap}  cur {cur_s}s  last {last_s}s  best {best_s}s",
+             color))
+    return info_lines

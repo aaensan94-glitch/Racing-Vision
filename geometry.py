@@ -87,3 +87,34 @@ def catmull_rom(p0: Point, p1: Point, p2: Point, p3: Point,
                     (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3)
         pts.append((x, y))
     return pts
+
+
+def trail_gate_xpt(prev_pt: Point, gp: Point, gate,
+                   trail_tail: List[Point]) -> Optional[Point]:
+    """Returns the intersection of the car's path with the gate line.
+
+    Uses a Catmull-Rom spline through the last trail points for accuracy;
+    falls back to a straight segment when fewer than three trail points exist.
+
+    Args:
+        prev_pt: Previous car position.
+        gp: Current car position.
+        gate: Gate candidate (must have post_a and post_b attributes).
+        trail_tail: Recent trail points used to build the spline.
+
+    Returns:
+        Intersection point, or None.
+    """
+    a, b = gate.post_a, gate.post_b
+    if trail_tail is not None and len(trail_tail) >= 3:
+        p0 = trail_tail[-3]
+        p1 = trail_tail[-2]
+        p2 = trail_tail[-1]
+        p3 = (2 * gp[0] - prev_pt[0], 2 * gp[1] - prev_pt[1])
+        pts = catmull_rom(p0, p1, p2, p3, n=10)
+        for i in range(len(pts) - 1):
+            xpt = segment_intersection(pts[i], pts[i + 1], a, b)
+            if xpt is not None:
+                return xpt
+    # fallback: straight line
+    return segment_intersection(prev_pt, gp, a, b)

@@ -198,3 +198,55 @@ class MultiTracker:
     def names(self):
         """Returns the list of car names in insertion order."""
         return list(self.trackers.keys())
+
+
+def apply_image_adjustments(frame: np.ndarray,
+                             adjust_vals: Dict[str, int]) -> np.ndarray:
+    """Applies brightness, contrast, gamma, and saturation adjustments to a frame.
+
+    All sliders are neutral at 100. Returns the original frame unchanged when
+    all values are at neutral so the fast path avoids unnecessary copies.
+
+    Args:
+        frame: BGR input frame.
+        adjust_vals: Dict with keys Brightness, Contrast, Gamma, Saturation
+            (integer slider values; 100 = neutral).
+
+    Returns:
+        Adjusted BGR frame (may be a new array or the original).
+    """
+    b = adjust_vals["Brightness"]
+    c = adjust_vals["Contrast"]
+    gm = adjust_vals["Gamma"]
+    sa = adjust_vals["Saturation"]
+    if (b, c, gm, sa) == (100, 100, 100, 100):
+        return frame
+    frame = cv2.convertScaleAbs(frame, alpha=c / 100.0,
+                                beta=float(b - 100))  # brightness/contrast
+    gamma = max(0.1, gm / 100.0)
+    lut = np.clip((np.arange(256) / 255.0) ** (1.0 / gamma) * 255,
+                  0, 255).astype(np.uint8)
+    frame = cv2.LUT(frame, lut)  # apply gamma correction via lookup table
+    if sa != 100:
+        hsv_img = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV).astype(np.int32)
+        hsv_img[..., 1] = np.clip(hsv_img[..., 1] * sa / 100, 0, 255)
+        frame = cv2.cvtColor(hsv_img.astype(np.uint8), cv2.COLOR_HSV2BGR)
+    return frame
+
+
+def apply_roi_mask(frame: np.ndarray,
+                   roi_pts: list) -> np.ndarray:
+    """Masks the frame to the ROI polygon; returns the original if no ROI set.
+
+    Args:
+        frame: BGR input frame.
+        roi_pts: List of four (x, y) polygon corners, or fewer if not yet set.
+
+    Returns:
+        Masked frame (new array) or the original frame when roi_pts has < 4 points.
+    """
+    if len(roi_pts) != 4:
+        return frame
+    mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+    cv2.fillPoly(mask, [np.array(roi_pts, dtype=np.int32)], 255)  # polygon ROI mask
+    return cv2.bitwise_and(frame, frame, mask=mask)

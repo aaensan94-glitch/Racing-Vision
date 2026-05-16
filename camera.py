@@ -8,6 +8,8 @@ from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 
+from gates import GateCandidate, scale_gates_and_roi
+
 CAPTURE_WIDTH = 1280
 CAPTURE_HEIGHT = 720
 CAPTURE_FPS = 30
@@ -246,3 +248,86 @@ def open_capture(source, mode: Optional[CamMode] = None):
             break
         time.sleep(0.02)
     return wrapper
+
+
+def setup_camera(source):
+    """Queries camera modes, opens the capture, and returns all setup values.
+
+    Starts in calibration mode (highest resolution). The caller can toggle to
+    race mode later with switch_camera_mode.
+
+    Args:
+        source: Camera index (int) or "sim".
+
+    Returns:
+        Tuple (cap, race_mode, cal_mode, current_mode, actual_w, actual_h).
+    """
+    race_mode: Optional[CamMode] = None
+    cal_mode: Optional[CamMode] = None
+    if isinstance(source, int):
+        available = list_v4l2_modes(source)
+        if available:
+            race_mode, cal_mode = pick_default_modes(available)
+            if race_mode:
+                print(f"[modes] race={race_mode[1]}x{race_mode[2]}@"
+                      f"{race_mode[3]:.0f}  cal={cal_mode[1]}x{cal_mode[2]}@"
+                      f"{cal_mode[3]:.0f} (toggle: h)")
+        else:
+            print("[modes] v4l2-ctl unavailable or no modes found — "
+                  "using default 1280x720@30")
+    current_mode: Optional[CamMode] = cal_mode or race_mode
+    cap = open_capture(source, current_mode)
+    actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    print(f"[capture] source={source} resolution={actual_w}x{actual_h}")
+    return cap, race_mode, cal_mode, current_mode, actual_w, actual_h
+
+
+def switch_camera_mode(source, cap, current_mode: CamMode,
+                       race_mode: CamMode, cal_mode: CamMode,
+                       gates: List[GateCandidate], mouse_state: dict,
+                       trails: dict, car_names: List[str],
+                       lap_trail: dict, best_trail: dict,
+                       prev: dict):
+    """Switches between race and calibration modes and rescales dependent state.
+
+    Releases the current capture, opens a new one at the target mode, and
+    rescales gates, ROI, and trails when the resolution changes.
+
+    Args:
+        source: Camera index passed to open_capture.
+        cap: Active capture to release.
+        current_mode: Currently active CamMode.
+        race_mode: Race CamMode (lower resolution, higher FPS).
+        cal_mode: Calibration CamMode (higher resolution).
+        gates: Gate list rescaled in place on resolution change.
+        mouse_state: Dict containing roi_pts, updated in place.
+        trails: Per-car history deques, cleared on resolution change.
+        car_names: List of car names.
+        lap_trail: Per-car current-lap lists, cleared on resolution change.
+        best_trail: Per-car best-lap lists, cleared on resolution change.
+        prev: Per-car previous position, reset on resolution change.
+
+    Returns:
+        Tuple (cap, new_mode, last_frame_id) where last_frame_id is reset to -1.
+    """
+    new_mode = cal_mode if current_mode == race_mode else race_mode
+    old_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    old_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+    cap = open_capture(source, new_mode)
+    new_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    new_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if old_w > 0 and old_h > 0 and (old_w, old_h) != (new_w, new_h):
+        sx, sy = new_w / old_w, new_h / old_h
+        mouse_state["roi_pts"] = scale_gates_and_roi(
+            gates, mouse_state["roi_pts"], sx, sy)
+        for tr in trails.values():
+            tr.clear()
+        for name in car_names:
+            lap_trail[name].clear()
+            best_trail[name].clear()
+            prev[name] = None
+    label = "cal" if new_mode == cal_mode else "race"
+    print(f"[mode] {label} — {new_w}x{new_h}@{new_mode[3]:.0f}")
+    return cap, new_mode, -1

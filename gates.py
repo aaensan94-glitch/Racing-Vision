@@ -1,10 +1,14 @@
+import json
+import os
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
 
 from geometry import segments_intersect, point_segment_distance, catmull_rom
+
+_CFG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs")
 
 Point = Tuple[float, float]
 
@@ -623,3 +627,160 @@ def draw_gates(img: np.ndarray, gates: List[GateCandidate]):
             cv2.putText(img, f"G{i}", (mx + 5, my - 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2,
                         cv2.LINE_AA)  # fallback index label when digit is unknown
+
+
+def scale_gates_and_roi(gates: List["GateCandidate"],
+                        roi_pts: List[Tuple[int, int]],
+                        sx: float, sy: float) -> List[Tuple[int, int]]:
+    """Scales gates in place and returns rescaled ROI points for a resolution switch.
+
+    Args:
+        gates: Gate candidates to rescale in place.
+        roi_pts: ROI polygon points to rescale (not mutated; new list returned).
+        sx: Horizontal scale factor (new_width / old_width).
+        sy: Vertical scale factor (new_height / old_height).
+
+    Returns:
+        Rescaled ROI point list.
+    """
+    for g in gates:
+        g.post_a = (g.post_a[0] * sx, g.post_a[1] * sy)
+        g.post_b = (g.post_b[0] * sx, g.post_b[1] * sy)
+        g.line_p1 = (g.line_p1[0] * sx, g.line_p1[1] * sy)
+        g.line_p2 = (g.line_p2[0] * sx, g.line_p2[1] * sy)
+        g.radius_a = g.radius_a * (sx + sy) * 0.5
+        g.radius_b = g.radius_b * (sx + sy) * 0.5
+    return [(int(p[0] * sx), int(p[1] * sy)) for p in roi_pts]
+
+
+def _source_suffix(source) -> str:
+    return "_sim" if source == "sim" else ""
+
+
+def gates_path(source) -> str:
+    """Returns the config file path for the gates of the given source."""
+    return os.path.join(_CFG_DIR, f"gates{_source_suffix(source)}.json")
+
+
+def load_gates(
+    source,
+) -> Tuple[List[GateCandidate], Optional[Tuple[int, int]]]:
+    """Returns saved gates and the resolution at save time (used to rescale).
+
+    Args:
+        source: Camera index or "sim".
+
+    Returns:
+        Tuple (gates, resolution) where resolution may be None for legacy files.
+    """
+    try:
+        with open(gates_path(source)) as f:
+            raw = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return [], None
+    # legacy format: bare list. Current format: dict with resolution + gates.
+    if isinstance(raw, list):
+        data = raw
+        res = None
+    else:
+        data = raw.get("gates", [])
+        r = raw.get("resolution")
+        res = (int(r[0]), int(r[1])) if r and len(r) == 2 else None
+    gates = [GateCandidate(
+        post_a=tuple(g["post_a"]),
+        post_b=tuple(g["post_b"]),
+        radius_a=float(g["radius_a"]),
+        radius_b=float(g["radius_b"]),
+        line_p1=tuple(g["line_p1"]),
+        line_p2=tuple(g["line_p2"]),
+        digit=int(g.get("digit", -1)),
+        digit_confidence=float(g.get("digit_confidence", 0.0)),
+        digit_side=g.get("digit_side", ""),
+        forward=tuple(g.get("forward", [0.0, 0.0])),
+    ) for g in data]
+    return gates, res
+
+
+def save_gates(gates: List[GateCandidate], source,
+               resolution: Optional[Tuple[int, int]] = None) -> None:
+    """Persists gates and the capture resolution to the config file.
+
+    Args:
+        gates: Gate candidates to save.
+        source: Camera index or "sim"; determines the file name.
+        resolution: (width, height) at the time of detection, or None.
+    """
+    data = [{
+        "post_a": list(g.post_a),
+        "post_b": list(g.post_b),
+        "radius_a": g.radius_a,
+        "radius_b": g.radius_b,
+        "line_p1": list(g.line_p1),
+        "line_p2": list(g.line_p2),
+        "digit": g.digit,
+        "digit_confidence": g.digit_confidence,
+        "digit_side": g.digit_side,
+        "forward": list(g.forward),
+    } for g in gates]
+    payload: dict = {"gates": data}
+    if resolution is not None:
+        payload["resolution"] = [int(resolution[0]), int(resolution[1])]
+    with open(gates_path(source), "w") as f:
+        json.dump(payload, f, indent=2)
+
+
+def detect_and_save_gates(frame: np.ndarray, frame_proc: np.ndarray,
+                          use_clahe: bool, digit_classifier,
+                          lap_tracker, car_names: List[str],
+                          cap, source):
+    """Detects gates, classifies digits, orders them, and persists to disk.
+
+    Args:
+        frame: Full-resolution BGR frame (used for digit crop extraction).
+        frame_proc: ROI-masked frame passed to the gate detector.
+        use_clahe: Whether to apply CLAHE contrast enhancement during detection.
+        digit_classifier: Loaded DigitClassifier, or None to trigger lazy load.
+        lap_tracker: LapTracker whose gate count and state are updated in place.
+        car_names: Car names whose expected-gate state is reset on reorder.
+        cap: Active capture object, queried for the current resolution.
+        source: Camera source identifier used for the save path.
+
+    Returns:
+        Tuple (gates, gate_circles, gate_lines, digit_classifier).
+    """
+    gates, gate_circles, gate_lines = detect_gates(frame_proc,
+                                                   use_clahe=use_clahe)
+    print(f"[gates] circles={len(gate_circles)} "
+          f"lines={len(gate_lines)} gates={len(gates)}")
+    if gates:
+        if digit_classifier is None:
+            from digits import DigitClassifier
+            try:
+                digit_classifier = DigitClassifier.load("models/digits.pt")
+                print("[gates] loaded models/digits.pt")
+            except FileNotFoundError:
+                print("[gates] models/digits.pt not found — "
+                      "run train_digits.py first")
+        if digit_classifier is not None:
+            for g in gates:
+                classify_gate_digit(digit_classifier, frame, g)
+            ordered, warns = order_gates(gates)
+            print("[gates] order: " + " -> ".join(
+                f"{g.digit}({g.digit_confidence:.2f},{g.digit_side})"
+                for g in ordered))
+            for w in warns:
+                print(f"[gates] WARN {w}")
+            if ordered:
+                gates = ordered
+                n = max(g.digit for g in ordered) + 1
+                lap_tracker.num_gates = n
+                for name in car_names:
+                    lap_tracker._state[name].expected = 0
+                print(f"[gates] using {n} ordered gates, timing reset")
+        panel = build_crops_panel(frame, gates)
+        cv2.imshow("Gate Crops", panel)  # debug panel showing all gate crops
+    cur_res = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+               int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+    save_gates(gates, source, resolution=cur_res)
+    print(f"[session] saved {len(gates)} gates → {gates_path(source)}")
+    return gates, gate_circles, gate_lines, digit_classifier

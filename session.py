@@ -1,8 +1,8 @@
+import csv
 import json
 import os
-from typing import List, Optional, Tuple
 
-from gates import GateCandidate
+from timing import LapTracker
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CFG_DIR = os.path.join(BASE_DIR, "configs")
@@ -25,10 +25,6 @@ def _session_path(source) -> str:
     return os.path.join(CFG_DIR, f"session{_source_suffix(source)}.json")
 
 
-def _gates_path(source) -> str:
-    return os.path.join(CFG_DIR, f"gates{_source_suffix(source)}.json")
-
-
 def _load_session(source) -> dict:
     try:
         with open(_session_path(source)) as f:
@@ -42,61 +38,43 @@ def _save_session(data: dict, source) -> None:
         json.dump(data, f, indent=2)
 
 
-def _load_gates(
-    source,
-) -> Tuple[List[GateCandidate], Optional[Tuple[int, int]]]:
-    """Returns saved gates and the resolution at save time (used to rescale).
+def open_log(logs_dir: str, ts: str):
+    """Opens a position log CSV and writes the header row.
 
     Args:
-        source: Camera index or "sim".
+        logs_dir: Directory for the log file.
+        ts: Timestamp string used in the file name.
 
     Returns:
-        Tuple (gates, resolution) where resolution may be None for legacy files.
+        Tuple (log_f, writer, log_path).
     """
-    try:
-        with open(_gates_path(source)) as f:
-            raw = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return [], None
-    # legacy format: bare list. Current format: dict with resolution + gates.
-    if isinstance(raw, list):
-        data = raw
-        res = None
-    else:
-        data = raw.get("gates", [])
-        r = raw.get("resolution")
-        res = (int(r[0]), int(r[1])) if r and len(r) == 2 else None
-    gates = [GateCandidate(
-        post_a=tuple(g["post_a"]),
-        post_b=tuple(g["post_b"]),
-        radius_a=float(g["radius_a"]),
-        radius_b=float(g["radius_b"]),
-        line_p1=tuple(g["line_p1"]),
-        line_p2=tuple(g["line_p2"]),
-        digit=int(g.get("digit", -1)),
-        digit_confidence=float(g.get("digit_confidence", 0.0)),
-        digit_side=g.get("digit_side", ""),
-        forward=tuple(g.get("forward", [0.0, 0.0])),
-    ) for g in data]
-    return gates, res
+    log_path = os.path.join(logs_dir, f"log_{ts}.csv")
+    log_f = open(log_path, "w", newline="", encoding="utf-8")
+    writer = csv.writer(log_f)
+    writer.writerow(["t", "car", "x", "y", "speed_px_s"])
+    return log_f, writer, log_path
 
 
-def _save_gates(gates: List[GateCandidate], source,
-                resolution: Optional[Tuple[int, int]] = None) -> None:
-    data = [{
-        "post_a": list(g.post_a),
-        "post_b": list(g.post_b),
-        "radius_a": g.radius_a,
-        "radius_b": g.radius_b,
-        "line_p1": list(g.line_p1),
-        "line_p2": list(g.line_p2),
-        "digit": g.digit,
-        "digit_confidence": g.digit_confidence,
-        "digit_side": g.digit_side,
-        "forward": list(g.forward),
-    } for g in gates]
-    payload = {"gates": data}
-    if resolution is not None:
-        payload["resolution"] = [int(resolution[0]), int(resolution[1])]
-    with open(_gates_path(source), "w") as f:
-        json.dump(payload, f, indent=2)
+def save_race_logs(lap_tracker: LapTracker, logs_dir: str, ts: str,
+                   tag: str = "done") -> None:
+    """Saves gate-event and lap-summary CSVs for the current race session.
+
+    Does nothing when the lap tracker has no events recorded yet.
+
+    Args:
+        lap_tracker: LapTracker instance with the current race data.
+        logs_dir: Directory path where CSV files are written.
+        ts: Timestamp string used in the file names.
+        tag: Log prefix printed with each saved path.
+    """
+    events_df = lap_tracker.to_dataframe()
+    if events_df.empty:
+        return
+    ev_path = os.path.join(logs_dir, f"gates_{ts}.csv")
+    sum_path = os.path.join(logs_dir, f"laps_{ts}.csv")
+    summary = lap_tracker.summary()
+    events_df.to_csv(ev_path, index=False)
+    summary.to_csv(sum_path, index=False)
+    print(f"[{tag}] gate events: {ev_path}")
+    print(f"[{tag}] lap summary: {sum_path}")
+    print(summary.to_string(index=False))
