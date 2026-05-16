@@ -1,115 +1,19 @@
 import os
-import json
-import re
-import subprocess
-import threading
-import time
 import csv
+import time
 from collections import deque
-from contextlib import contextmanager
 from typing import Dict, Deque, List, Tuple, Optional
 
 import cv2
 import numpy as np
 
-
-class ThreadedCapture:
-    """Wrapper um cv2.VideoCapture: Hintergrund-Thread liest Frames so
-    schnell wie die Kamera liefert; read() kehrt sofort mit dem letzten
-    Frame zurück (evtl. dem gleichen wie beim vorherigen Aufruf).
-    frame_id() zählt hoch sobald ein neuer Frame eingegangen ist — damit
-    kann der Main-Loop Vision/Gate-Verarbeitung überspringen, wenn das
-    Bild unverändert ist."""
-
-    def __init__(self, cap: cv2.VideoCapture):
-        self._cap = cap
-        self._lock = threading.Lock()
-        self._frame: Optional[np.ndarray] = None
-        self._ok = False
-        self._frame_id = 0
-        self._running = True
-        self._thread = threading.Thread(target=self._worker, daemon=True)
-        self._thread.start()
-
-    def _worker(self) -> None:
-        while self._running:
-            ok, frame = self._cap.read()
-            with self._lock:
-                self._ok = ok
-                if ok and frame is not None:
-                    self._frame = frame
-                    self._frame_id += 1
-            if not ok:
-                time.sleep(0.02)
-
-    def read(self):
-        with self._lock:
-            if self._frame is None:
-                return False, None
-            return self._ok, self._frame
-
-    def frame_id(self) -> int:
-        with self._lock:
-            return self._frame_id
-
-    def isOpened(self) -> bool:
-        return self._cap.isOpened()
-
-    def get(self, prop):
-        return self._cap.get(prop)
-
-    def set(self, prop, val):
-        return self._cap.set(prop, val)
-
-    def release(self) -> None:
-        self._running = False
-        self._thread.join(timeout=1.0)
-        self._cap.release()
-
-
-class Perf:
-    """Block-Timer. Toggle mit 'd'. Druckt alle PRINT_EVERY Frames eine
-    Aufschlüsselung der akkumulierten Zeiten pro Label."""
-    PRINT_EVERY = 30
-
-    def __init__(self):
-        self.on = False
-        self.acc: Dict[str, float] = {}
-        self.n = 0
-
-    @contextmanager
-    def timed(self, label: str):
-        if not self.on:
-            yield
-            return
-        t0 = time.perf_counter()
-        try:
-            yield
-        finally:
-            self.acc[label] = self.acc.get(label, 0.0) + (time.perf_counter() - t0)
-
-    def mark(self, label: str, dt: float) -> None:
-        if self.on:
-            self.acc[label] = self.acc.get(label, 0.0) + dt
-
-    def now(self) -> float:
-        return time.perf_counter() if self.on else 0.0
-
-    def tick(self):
-        if not self.on:
-            return
-        self.n += 1
-        if self.n < self.PRINT_EVERY:
-            return
-        avg_ms = sorted(
-            ((k, v / self.n * 1000) for k, v in self.acc.items()),
-            key=lambda kv: -kv[1])
-        total = sum(v for _, v in avg_ms)
-        parts = "  ".join(f"{k}={v:.1f}" for k, v in avg_ms)
-        print(f"[perf/{self.n}] total={total:.1f}ms  {parts}")
-        self.acc.clear()
-        self.n = 0
-
+from camera import (CamMode, ThreadedCapture, open_capture, list_v4l2_modes,
+                    pick_default_modes, prompt_camera_choice)
+from session import (LOGS_DIR, HUD_CFG_PATH, CARS_CFG_PATH,
+                     _load_session, _save_session, _load_gates, _save_gates,
+                     _gates_path, _session_path)
+from hud import HudConfig, _make_histogram, _panel, draw_polyline
+from perf import Perf
 from vision import MultiTracker
 from gates import (detect_gates, draw_gates, build_crops_panel,
                    classify_gate_digit, order_gates, gate_crossed,
@@ -120,12 +24,27 @@ import sound
 
 Point = Tuple[float, float]
 
+DISPLAY_WIDTH = 1280
+TRAIL_LEN = 0  # 0 = unlimited, otherwise max points per trail
+WINDOW = "Race Vision CV1"
+
+paused = False
+
 
 def _trail_gate_xpt(prev_pt: Point, gp: Point, gate,
                     trail_tail: List[Point]) -> Optional[Point]:
-    """Schnittpunkt der Fahrbahn (Spline oder gerade) mit der Gate-Linie."""
+    """Returns the intersection of the car's path (spline or straight) with the gate line.
+
+    Args:
+        prev_pt: Previous car position.
+        gp: Current car position.
+        gate: Gate candidate to intersect with.
+        trail_tail: Recent trail points used to build the spline.
+
+    Returns:
+        Intersection point, or None if there is no intersection.
+    """
     a, b = gate.post_a, gate.post_b
-    # Spline-Pfad wie in gate_crossed
     if trail_tail is not None and len(trail_tail) >= 3:
         p0 = trail_tail[-3]
         p1 = trail_tail[-2]
@@ -136,319 +55,24 @@ def _trail_gate_xpt(prev_pt: Point, gp: Point, gate,
             xpt = segment_intersection(pts[i], pts[i + 1], a, b)
             if xpt is not None:
                 return xpt
-    # Fallback: gerade Linie
+    # fallback: straight line
     return segment_intersection(prev_pt, gp, a, b)
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CFG_DIR = os.path.join(BASE_DIR, "configs")
-CARS_CFG_PATH = os.path.join(CFG_DIR, "cars.json")
-HUD_CFG_PATH = os.path.join(CFG_DIR, "hud.json")
-def _source_suffix(source) -> str:
-    """Sim und Kamera getrennt — Positionen (Gates/ROI) und Filter sind inkompatibel."""
-    return "_sim" if source == "sim" else ""
 
-
-def _session_path(source) -> str:
-    return os.path.join(CFG_DIR, f"session{_source_suffix(source)}.json")
-
-
-def _gates_path(source) -> str:
-    return os.path.join(CFG_DIR, f"gates{_source_suffix(source)}.json")
-LOGS_DIR = os.path.join(BASE_DIR, "logs")
-os.makedirs(LOGS_DIR, exist_ok=True)
-
-
-def _load_session(source) -> dict:
-    try:
-        with open(_session_path(source)) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-
-def _save_session(data: dict, source) -> None:
-    with open(_session_path(source), "w") as f:
-        json.dump(data, f, indent=2)
-
-
-def _load_gates(
-    source,
-) -> Tuple[List["GateCandidate"], Optional[Tuple[int, int]]]:
-    """Gates + Auflösung zum Zeitpunkt des Speicherns (für Rescale)."""
-    try:
-        with open(_gates_path(source)) as f:
-            raw = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return [], None
-    # Altes Format: bare Liste. Neues Format: Dict mit resolution+gates.
-    if isinstance(raw, list):
-        data = raw
-        res = None
-    else:
-        data = raw.get("gates", [])
-        r = raw.get("resolution")
-        res = (int(r[0]), int(r[1])) if r and len(r) == 2 else None
-    gates = [GateCandidate(
-        post_a=tuple(g["post_a"]),
-        post_b=tuple(g["post_b"]),
-        radius_a=float(g["radius_a"]),
-        radius_b=float(g["radius_b"]),
-        line_p1=tuple(g["line_p1"]),
-        line_p2=tuple(g["line_p2"]),
-        digit=int(g.get("digit", -1)),
-        digit_confidence=float(g.get("digit_confidence", 0.0)),
-        digit_side=g.get("digit_side", ""),
-        forward=tuple(g.get("forward", [0.0, 0.0])),
-    ) for g in data]
-    return gates, res
-
-
-def _save_gates(gates: List["GateCandidate"], source,
-                resolution: Optional[Tuple[int, int]] = None) -> None:
-    data = [{
-        "post_a": list(g.post_a),
-        "post_b": list(g.post_b),
-        "radius_a": g.radius_a,
-        "radius_b": g.radius_b,
-        "line_p1": list(g.line_p1),
-        "line_p2": list(g.line_p2),
-        "digit": g.digit,
-        "digit_confidence": g.digit_confidence,
-        "digit_side": g.digit_side,
-        "forward": list(g.forward),
-    } for g in gates]
-    payload = {"gates": data}
-    if resolution is not None:
-        payload["resolution"] = [int(resolution[0]), int(resolution[1])]
-    with open(_gates_path(source), "w") as f:
-        json.dump(payload, f, indent=2)
-
-
-class HudConfig:
-    FONT = cv2.FONT_HERSHEY_SIMPLEX
-
-    def __init__(self, path: str):
-        with open(path) as f:
-            cfg = json.load(f)
-        self.scale: float = float(cfg["font_scale"])
-        self.thickness: int = int(cfg["font_thickness"])
-        self.line_h: int = int(cfg["line_height"])
-        self.pad: int = int(cfg["padding"])
-        c = cfg["text_color"]
-        self.color: Tuple[int, int, int] = (int(c[0]), int(c[1]), int(c[2]))
-        self.panel_alpha: float = float(cfg["panel_alpha"])
-
-WINDOW = "Race Vision CV1"
-
-paused = False
-
-
-def _make_histogram(bgr: np.ndarray, w: int = 420, h: int = 200) -> np.ndarray:
-    """BGR-Histogramm mit Achsenbeschriftung, passend zum Adjust-Fenster."""
-    canvas = np.full((h, w, 3), 30, dtype=np.uint8)
-    axis_y = h - 22
-    plot_h = axis_y - 10
-    channel_colors = [(255, 80, 80), (80, 255, 80), (80, 80, 255)]
-    for i, col in enumerate(channel_colors):
-        hist = cv2.calcHist([bgr], [i], None, [256], [0, 256]).flatten()
-        m = float(hist.max()) or 1.0
-        pts = np.zeros((256, 2), dtype=np.int32)
-        for x in range(256):
-            pts[x, 0] = int(x * (w - 1) / 255)
-            pts[x, 1] = axis_y - int(hist[x] / m * plot_h)
-        cv2.polylines(canvas, [pts.reshape(-1, 1, 2)], False, col, 1,
-                      cv2.LINE_AA)
-    cv2.line(canvas, (0, axis_y), (w, axis_y), (90, 90, 90), 1)
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    for val, lx in ((0, 2), (64, w // 4 - 8), (128, w // 2 - 12),
-                    (192, 3 * w // 4 - 12), (255, w - 32)):
-        cv2.line(canvas, (lx + 10, axis_y), (lx + 10, axis_y + 3),
-                 (120, 120, 120), 1)
-        cv2.putText(canvas, str(val), (lx, axis_y + 16), font, 0.4,
-                    (200, 200, 200), 1, cv2.LINE_AA)
-    return canvas
-
-
-def _panel(img, x: int, y: int, w: int, h: int, alpha: float = 0.6) -> None:
-    """Dark translucent background so Text über hellem Papier lesbar bleibt."""
-    H, W = img.shape[:2]
-    x0, y0 = max(0, x), max(0, y)
-    x1, y1 = min(W, x + w), min(H, y + h)
-    if x1 <= x0 or y1 <= y0:
-        return
-    sub = img[y0:y1, x0:x1]
-    dark = np.zeros_like(sub)
-    cv2.addWeighted(sub, 1 - alpha, dark, alpha, 0, sub)
-
-
-def draw_polyline(img, pts: List[Point], color=(255, 255, 0), thickness=2,
-                  closed=False):
-    if pts is None or len(pts) < 2:
-        return
-    if len(pts) >= 4:
-        # Phantom-Punkte spiegeln damit Start/Ende auch Kurven werden
-        p_start = (2 * pts[0][0] - pts[1][0], 2 * pts[0][1] - pts[1][1])
-        p_end = (2 * pts[-1][0] - pts[-2][0], 2 * pts[-1][1] - pts[-2][1])
-        ext = [p_start] + list(pts) + [p_end]
-        smooth: List[Point] = []
-        for i in range(1, len(ext) - 2):
-            smooth.extend(catmull_rom(ext[i - 1], ext[i], ext[i + 1],
-                                      ext[i + 2], n=6))
-        pts = smooth
-    p = np.array([[int(x), int(y)] for x, y in pts],
-                 dtype=np.int32).reshape((-1, 1, 2))
-    cv2.polylines(img, [p], isClosed=closed, color=color, thickness=thickness)
-
-
-CAPTURE_WIDTH = 1280
-CAPTURE_HEIGHT = 720
-CAPTURE_FPS = 30
-DISPLAY_WIDTH = 1280
-TRAIL_LEN = 0  # 0 = unbegrenzt, sonst max. Anzahl Punkte pro Spur
-
-
-def scan_cameras() -> List[Tuple[int, str]]:
-    """Scan /sys/class/video4linux, return (index, name) for capture-capable,
-    deduplicated physical devices (lowest index per device name)."""
-    sys_root = "/sys/class/video4linux"
-    if not os.path.isdir(sys_root):
-        return []
-    indices = sorted(
-        int(n[len("video"):]) for n in os.listdir(sys_root) if n.startswith("video")
-    )
-    seen_names = set()
-    found: List[Tuple[int, str]] = []
-    for i in indices:
-        try:
-            with open(os.path.join(sys_root, f"video{i}", "name")) as f:
-                name = f.read().strip()
-        except OSError:
-            continue
-        if name in seen_names:
-            continue
-        cap = cv2.VideoCapture(i)
-        ok_open = cap.isOpened()
-        ok_frame = False
-        if ok_open:
-            ok_frame, frame = cap.read()
-            if not ok_frame or frame is None or frame.size == 0:
-                ok_frame = False
-        cap.release()
-        if not ok_frame:
-            continue
-        seen_names.add(name)
-        found.append((i, name))
-    return found
-
-
-def prompt_camera_choice():
-    """Returns int (camera index) or 'sim' for the simulator."""
-    print("[scan] searching for cameras...")
-    cams = scan_cameras()
-    print("[scan] available sources:")
-    for idx, name in cams:
-        print(f"  [{idx}] {name}")
-    print("  [s] Simulation")
-    valid = [str(idx) for idx, _ in cams] + ["s"]
-    while True:
-        raw = input(f"Select source {valid}: ").strip().lower()
-        if raw == "s":
-            return "sim"
-        try:
-            choice = int(raw)
-            if choice in [c[0] for c in cams]:
-                return choice
-        except ValueError:
-            pass
-        print("invalid choice, try again.")
-
-
-CamMode = Tuple[str, int, int, float]  # (fourcc, width, height, fps)
-
-
-def list_v4l2_modes(device_index: int) -> List[CamMode]:
-    """Parst v4l2-ctl --list-formats-ext. Leer falls v4l2-ctl fehlt."""
-    try:
-        out = subprocess.check_output(
-            ["v4l2-ctl", "--list-formats-ext",
-             "-d", f"/dev/video{device_index}"],
-            stderr=subprocess.DEVNULL, text=True, timeout=2.0)
-    except (FileNotFoundError, subprocess.CalledProcessError,
-            subprocess.TimeoutExpired):
-        return []
-    modes: List[CamMode] = []
-    cur_fmt = ""
-    cur_w = cur_h = 0
-    for raw in out.splitlines():
-        line = raw.strip()
-        m = re.match(r"\[\d+\]:\s*'(\w+)'", line)
-        if m:
-            cur_fmt = m.group(1)
-            continue
-        m = re.match(r"Size:\s*Discrete\s+(\d+)x(\d+)", line)
-        if m:
-            cur_w, cur_h = int(m.group(1)), int(m.group(2))
-            continue
-        m = re.match(r"Interval:\s*Discrete\s+[\d.]+s\s+\(([\d.]+)\s*fps\)",
-                     line)
-        if m and cur_fmt and cur_w:
-            modes.append((cur_fmt, cur_w, cur_h, float(m.group(1))))
-    return modes
-
-
-def pick_default_modes(
-    modes: List[CamMode],
-) -> Tuple[Optional[CamMode], Optional[CamMode]]:
-    """(race, calibration) aus Modi wählen. MJPG bevorzugt, sonst jede."""
-    mjpg = [m for m in modes if m[0] == "MJPG"] or modes
-    if not mjpg:
-        return None, None
-    # Race: höchste FPS bei ≤1280x720, dann größte Auflösung als Tiebreaker.
-    race_pool = [m for m in mjpg if m[1] <= 1280 and m[2] <= 720] or mjpg
-    race = max(race_pool, key=lambda m: (m[3], m[1] * m[2]))
-    # Kalibrierung: größte Auflösung, dann FPS als Tiebreaker.
-    cal = max(mjpg, key=lambda m: (m[1] * m[2], m[3]))
-    return race, cal
-
-
-def open_capture(source, mode: Optional[CamMode] = None):
-    if source == "sim":
-        from sim import SimCapture
-        print("[capture] Simulation mode")
-        return SimCapture()
-    cap = cv2.VideoCapture(source)
-    if not cap.isOpened():
-        raise RuntimeError(f"Could not open camera index {source}")
-    fourcc, w, h, fps = mode or ("MJPG", CAPTURE_WIDTH, CAPTURE_HEIGHT,
-                                 float(CAPTURE_FPS))
-    # MJPG vor Auflösung setzen, sonst bleibt YUYV → bei 1280x720 über USB
-    # langsam (typ. 126ms/frame statt ~33ms).
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-    cap.set(cv2.CAP_PROP_FPS, fps)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    fcc = int(cap.get(cv2.CAP_PROP_FOURCC))
-    fcc_str = "".join(chr((fcc >> (8 * i)) & 0xFF) for i in range(4))
-    aw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    ah = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    print(f"[capture] fourcc={fcc_str} {aw}x{ah} "
-          f"fps={cap.get(cv2.CAP_PROP_FPS):.0f}")
-    wrapper = ThreadedCapture(cap)
-    # Warte auf ersten Frame, damit Main-Loop nicht sofort durch 'not ok' bricht.
-    t_wait0 = time.time()
-    while time.time() - t_wait0 < 2.0:
-        ok, _ = wrapper.read()
-        if ok:
-            break
-        time.sleep(0.02)
-    return wrapper
-
-
-def _scale_gates_and_roi(gates: List["GateCandidate"],
+def _scale_gates_and_roi(gates: List[GateCandidate],
                          roi_pts: List[Tuple[int, int]],
                          sx: float, sy: float) -> List[Tuple[int, int]]:
-    """Skaliert Gates in-place und ROI-Punkte (neue Liste) bei Moduswechsel."""
+    """Scales gates in place and returns rescaled ROI points for a mode switch.
+
+    Args:
+        gates: Gate candidates to rescale in place.
+        roi_pts: ROI polygon points to rescale (not mutated; new list returned).
+        sx: Horizontal scale factor (new_width / old_width).
+        sy: Vertical scale factor (new_height / old_height).
+
+    Returns:
+        Rescaled ROI point list.
+    """
     for g in gates:
         g.post_a = (g.post_a[0] * sx, g.post_a[1] * sy)
         g.post_b = (g.post_b[0] * sx, g.post_b[1] * sy)
@@ -477,8 +101,7 @@ def main():
     lap_trail: Dict[str, List[Point]] = {name: [] for name in car_names}
     best_trail: Dict[str, List[Point]] = {name: [] for name in car_names}
 
-
-    # Kamera-Modi abfragen; Race + Kalibrierungs-Modus auto-wählen.
+    # Query available camera modes and auto-select race and calibration modes.
     race_mode: Optional[CamMode] = None
     cal_mode: Optional[CamMode] = None
     if isinstance(source, int):
@@ -490,10 +113,10 @@ def main():
                       f"{race_mode[3]:.0f}  cal={cal_mode[1]}x{cal_mode[2]}@"
                       f"{cal_mode[3]:.0f} (toggle: h)")
         else:
-            print("[modes] v4l2-ctl fehlt oder keine Modi gefunden — "
-                  "nutze Default 1280x720@30")
-    # Start in Kalibrierungs-Modus (höchste Auflösung) — Gates kalibrieren,
-    # dann per 'h' runter in Race-Modus.
+            print("[modes] v4l2-ctl unavailable or no modes found — "
+                  "using default 1280x720@30")
+    # Start in calibration mode (highest resolution) — calibrate gates, then
+    # switch to race mode with 'h'.
     current_mode: Optional[CamMode] = cal_mode or race_mode
     cap = open_capture(source, current_mode)
     actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -506,11 +129,11 @@ def main():
     writer = csv.writer(log_f)
     writer.writerow(["t", "car", "x", "y", "speed_px_s"])
 
-    cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
+    cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)  # resizable display window
     if actual_w > 0:
         disp_h = int(actual_h * DISPLAY_WIDTH / actual_w)
-        cv2.resizeWindow(WINDOW, DISPLAY_WIDTH, disp_h)
-    fullscreen = False
+        cv2.resizeWindow(WINDOW, DISPLAY_WIDTH, disp_h)  # set initial window size
+    fullscreen = True
 
     session = _load_session(source)
     saved_roi = session.get("roi_pts", [])
@@ -519,8 +142,8 @@ def main():
         (int(p[0]), int(p[1])) for p in saved_roi
         if isinstance(p, (list, tuple)) and len(p) == 2
     ] if len(saved_roi) == 4 else []
-    # ROI auf aktuelle Auflösung skalieren, falls beim Speichern eine andere
-    # Auflösung aktiv war (Mode-Toggle zwischen Sessions).
+    # Rescale the saved ROI to the current resolution if the mode was different
+    # when the session was saved (e.g. race vs calibration mode across sessions).
     if (roi_pts_init and saved_sess_res and len(saved_sess_res) == 2
             and actual_w > 0 and actual_h > 0):
         osw, osh = int(saved_sess_res[0]), int(saved_sess_res[1])
@@ -552,7 +175,7 @@ def main():
                     param["roi_editing"] = False
                     print("[roi] 4 points set — mask active")
 
-    cv2.setMouseCallback(WINDOW, _on_mouse, mouse_state)
+    cv2.setMouseCallback(WINDOW, _on_mouse, mouse_state)  # register mouse handler for ROI editing
 
     fps = 0.0
     fps_last_t = time.time()
@@ -593,8 +216,8 @@ def main():
         n: (0.0, -1) for n in car_names}
     GATE_DEBOUNCE_S = 0.3
     lap_tracker = LapTracker(car_names)
-    # Pro Fahrzeug: True ab dem ersten Gate-0-Crossing. Damit unterscheiden
-    # wir das Start-Crossing (leise) vom späteren Messed-up-Reset.
+    # Per car: True after the first gate-0 crossing — distinguishes the silent
+    # initial start crossing from a later messed-up reset announcement.
     armed_before: Dict[str, bool] = {n: False for n in car_names}
     if gates:
         valid_digits = [g.digit for g in gates if g.digit >= 0]
@@ -610,14 +233,14 @@ def main():
     last_frame_id = -1
 
     while True:
-        pending_key = 255  # 255 = keine Taste
+        pending_key = 255  # 255 = no key pressed
         with perf.timed("capture"):
             if not paused:
-                # Warte auf neuen Frame (ThreadedCapture): sonst würden wir
-                # schneller als die Kamera loopen, doppelt rendern und bei
-                # Adjust-Filtern zwischen gefiltert/ungefiltert flackern.
-                # Tasten in der Wartezeit puffern, damit sie der Haupt-Handler
-                # weiter unten verarbeiten kann.
+                # Wait for a new frame from ThreadedCapture. Without this we
+                # would loop faster than the camera, render duplicate frames,
+                # and flicker in the Adjust window between filtered and
+                # unfiltered images. Buffer any key pressed while waiting so
+                # the main handler below can process it.
                 if hasattr(cap, "frame_id"):
                     while True:
                         fid = cap.frame_id()
@@ -633,7 +256,7 @@ def main():
 
         t = time.time()
 
-        # ----- Countdown-Ampel -----
+        # ----- Countdown lights -----
         if countdown_t0 is not None:
             elapsed = t - countdown_t0
             # lit: 0s→1, 1s→2, 2s→3, 3s→GO
@@ -643,11 +266,10 @@ def main():
                 countdown_beeps = lit
                 print(f"[countdown] {4 - lit}...")
             if lit >= 4 and countdown_beeps < 4:
-                # GO — Rennen starten
+                # GO — reset like 'n' but skip the log (no data yet)
                 sound.play_go()
                 countdown_beeps = 4
                 race_active = True
-                # Reset wie 'n' aber ohne Log (noch nichts da)
                 lap_tracker = LapTracker(car_names,
                                          num_gates=lap_tracker.num_gates)
                 for tr in trails.values():
@@ -668,7 +290,7 @@ def main():
         with perf.timed("filter"):
             if adjust_open:
                 for name, _d, _m in ADJUST_SLIDERS:
-                    adjust_vals[name] = cv2.getTrackbarPos(name, ADJUST_WIN)
+                    adjust_vals[name] = cv2.getTrackbarPos(name, ADJUST_WIN)  # read slider value
             b = adjust_vals["Brightness"]
             c_ = adjust_vals["Contrast"]
             gm = adjust_vals["Gamma"]
@@ -676,18 +298,18 @@ def main():
             if (b, c_, gm, sa) != (100, 100, 100, 100):
                 alpha = c_ / 100.0
                 beta = float(b - 100)
-                frame = cv2.convertScaleAbs(frame, alpha=alpha, beta=beta)
+                frame = cv2.convertScaleAbs(frame, alpha=alpha, beta=beta)  # brightness/contrast
                 gamma = max(0.1, gm / 100.0)
                 lut = np.clip((np.arange(256) / 255.0) ** (1.0 / gamma) * 255,
                               0, 255).astype(np.uint8)
-                frame = cv2.LUT(frame, lut)
+                frame = cv2.LUT(frame, lut)  # apply gamma correction via lookup table
                 if sa != 100:
                     hsv_img = cv2.cvtColor(
-                        frame, cv2.COLOR_BGR2HSV).astype(np.int32)
+                        frame, cv2.COLOR_BGR2HSV).astype(np.int32)  # convert for saturation edit
                     hsv_img[..., 1] = np.clip(
                         hsv_img[..., 1] * sa / 100, 0, 255)
                     frame = cv2.cvtColor(
-                        hsv_img.astype(np.uint8), cv2.COLOR_HSV2BGR)
+                        hsv_img.astype(np.uint8), cv2.COLOR_HSV2BGR)  # convert back to BGR
         if adjust_open:
             hist_canvas = _make_histogram(frame, w=520)
             header = np.full((150, 520, 3), 30, dtype=np.uint8)
@@ -703,14 +325,14 @@ def main():
                             font, 0.7, col, 2, cv2.LINE_AA)
                 y += 24
             canvas = np.vstack([header, hist_canvas])
-            cv2.imshow(ADJUST_WIN, canvas)
+            cv2.imshow(ADJUST_WIN, canvas)  # display adjust window with histogram
 
         with perf.timed("roi"):
             roi_pts = mouse_state["roi_pts"]
             if len(roi_pts) == 4:
                 mask = np.zeros(frame.shape[:2], dtype=np.uint8)
-                cv2.fillPoly(mask, [np.array(roi_pts, dtype=np.int32)], 255)
-                frame_proc = cv2.bitwise_and(frame, frame, mask=mask)
+                cv2.fillPoly(mask, [np.array(roi_pts, dtype=np.int32)], 255)  # polygon ROI mask
+                frame_proc = cv2.bitwise_and(frame, frame, mask=mask)          # apply mask to frame
             else:
                 frame_proc = frame
         with perf.timed("vision"):
@@ -743,13 +365,11 @@ def main():
                                 else:
                                     sound.play()
                                 if ev is not None and ev["lap_time_s"] is not None:
-                                    # Schnittpunkt VOR clear berechnen
+                                    # compute intersection before clearing the trail
                                     xpt = _trail_gate_xpt(
                                         prev_pt, gp, g, trail_tail)
-                                    # Alten Trail bis zum Gate verlängern
                                     if xpt is not None:
                                         lap_trail[name].append(xpt)
-                                    # Ist diese Runde die neue Bestzeit?
                                     is_new_best = ev["lap_time_s"] <= (
                                         lap_tracker.best_lap_time(name)
                                         or float("inf"))
@@ -770,7 +390,6 @@ def main():
                                     if tbl:
                                         print(tbl)
                                         print()
-                                    # Ziel erreicht?
                                     if (race_active
                                             and lap_tracker.lap(name) >= RACE_LAPS
                                             and not race_finished[name]):
@@ -796,9 +415,9 @@ def main():
                                             race_active = False
                                             print("\n=== RACE COMPLETE ===")
                                 elif ev is not None and ev["gate"] == 0:
-                                    # Gate 0 aber ungültige Runde → trotzdem reset.
-                                    # was_armed=False ist die allererste Start-
-                                    # Überquerung — dann keine Audio-Ansage.
+                                    # Gate 0 but invalid lap → still reset the trail.
+                                    # was_armed=False is the very first start crossing
+                                    # — skip the audio announcement in that case.
                                     xpt = _trail_gate_xpt(
                                         prev_pt, gp, g, trail_tail)
                                     if xpt is not None:
@@ -841,30 +460,30 @@ def main():
         _t_overlay = perf.now()
         if use_clahe:
             from gates import _clahe
-            lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+            lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)  # convert to LAB for CLAHE on L channel
             lab[:, :, 0] = _clahe.apply(lab[:, :, 0])
-            overlay = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+            overlay = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)  # convert back to BGR
         else:
             overlay = frame.copy()
 
         if roi_pts:
             roi_color = (0, 200, 255)
             for p in roi_pts:
-                cv2.circle(overlay, p, 6, roi_color, -1)
+                cv2.circle(overlay, p, 6, roi_color, -1)  # ROI corner dot
             if len(roi_pts) == 4:
                 arr = np.array(roi_pts, dtype=np.int32).reshape((-1, 1, 2))
                 cv2.polylines(overlay, [arr], isClosed=True, color=roi_color,
-                              thickness=2)
+                              thickness=2)                  # closed ROI polygon
             elif len(roi_pts) >= 2:
                 for i in range(len(roi_pts) - 1):
                     cv2.line(overlay, roi_pts[i], roi_pts[i + 1],
-                             roi_color, 2)
+                             roi_color, 2)                  # in-progress ROI edges
             if mouse_state["roi_editing"] and roi_pts:
                 mx_live = mouse_state["x"]
                 my_live = mouse_state["y"]
                 if 0 <= mx_live < overlay.shape[1] and 0 <= my_live < overlay.shape[0]:
                     cv2.line(overlay, roi_pts[-1], (mx_live, my_live),
-                             roi_color, 1)
+                             roi_color, 1)                  # rubber-band line to cursor
 
         if gates:
             draw_gates(overlay, gates)
@@ -881,11 +500,11 @@ def main():
                         sx, sy = ax + ux * g.radius_a, ay + uy * g.radius_a
                         ex, ey = bx - ux * g.radius_b, by - uy * g.radius_b
                         cv2.line(overlay, (int(sx), int(sy)),
-                                 (int(ex), int(ey)), (0, 255, 0), 5)
+                                 (int(ex), int(ey)), (0, 255, 0), 5)  # flash green on crossing
 
         perf.mark("overlay_base", perf.now() - _t_overlay)
 
-        # Bahnen zeichnen: History + Best = 50% transparent, aktuelle Runde opak
+        # Trails: history + best lap at 50% opacity; current lap fully opaque
         _t_trails = perf.now()
         trail_layer = overlay.copy()
         for name in car_names:
@@ -896,7 +515,7 @@ def main():
             if len(best_trail[name]) >= 2:
                 draw_polyline(trail_layer, best_trail[name],
                               color=color, thickness=3, closed=False)
-        cv2.addWeighted(trail_layer, 0.5, overlay, 0.5, 0, overlay)
+        cv2.addWeighted(trail_layer, 0.5, overlay, 0.5, 0, overlay)  # blend trail layer at 50%
         for name in car_names:
             color = tracker.car(name).display_color_bgr()
             if len(lap_trail[name]) >= 2:
@@ -905,7 +524,7 @@ def main():
         perf.mark("trails", perf.now() - _t_trails)
 
         _t_hud = perf.now()
-        # Per-Car Info als Block: erst sammeln, dann Panel + Text
+        # Collect per-car info lines first, then size the panel to fit
         info_lines: List[Tuple[str, Tuple[int, int, int]]] = []
         for name in car_names:
             color = tracker.car(name).display_color_bgr()
@@ -915,11 +534,11 @@ def main():
                 gx, gy = int(gp[0]), int(gp[1])
                 cnt = tracker.contour(name)
                 if cnt is not None:
-                    cv2.drawContours(overlay, [cnt], -1, color, 1)
-                cv2.circle(overlay, (gx, gy), 6, color, -1)
+                    cv2.drawContours(overlay, [cnt], -1, color, 1)  # car blob outline
+                cv2.circle(overlay, (gx, gy), 6, color, -1)          # car position dot
                 cv2.putText(overlay, name, (gx + 10, gy - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2,
-                            cv2.LINE_AA)
+                            cv2.LINE_AA)                              # car name label
 
             pos_str = f"({int(gp[0])},{int(gp[1])})" if gp is not None else "none"
             hsv = tracker.hsv(name)
@@ -942,7 +561,7 @@ def main():
 
         if show_hud:
             widths = [cv2.getTextSize(t, hud.FONT, hud.scale, hud.thickness)[0][0]
-                      for t, _ in info_lines]
+                      for t, _ in info_lines]  # measure text for panel sizing
             panel_w = (max(widths) if widths else 0) + 2 * hud.pad
             panel_h = len(info_lines) * hud.line_h + 2 * hud.pad
             _panel(overlay, 10, 10, panel_w, panel_h, hud.panel_alpha)
@@ -953,10 +572,10 @@ def main():
                             cv2.LINE_AA)
                 y_cursor += hud.line_h
 
-        # Countdown / Race Overlay
+        # Countdown / race traffic-light overlay
         if countdown_t0 is not None:
             lit = min(int(t - countdown_t0) + 1, 4)  # 1→2→3→4(GO)
-            # Ampel quer — 3 Lichter horizontal
+            # horizontal traffic light — 3 lamps side by side
             lamp_r = 45
             gap = 16
             w_total = 3 * (2 * lamp_r) + 4 * gap
@@ -966,19 +585,19 @@ def main():
             x0 = cx - w_total // 2
             y0 = cy - h_total // 2
             cv2.rectangle(overlay, (x0, y0), (x0 + w_total, y0 + h_total),
-                          (20, 20, 20), -1)
+                          (20, 20, 20), -1)   # housing fill
             cv2.rectangle(overlay, (x0, y0), (x0 + w_total, y0 + h_total),
-                          (60, 60, 60), 3)
+                          (60, 60, 60), 3)    # housing border
             for i in range(3):
                 lx = x0 + gap + lamp_r + i * (2 * lamp_r + gap)
                 if lit >= 4:
-                    color = (0, 200, 0)  # GO — alle grün
+                    color = (0, 200, 0)   # GO — all green
                 elif i < lit:
-                    color = (0, 0, 255)  # Rot an
+                    color = (0, 0, 255)   # red lamp on
                 else:
-                    color = (30, 30, 30)  # Aus
-                cv2.circle(overlay, (lx, cy), lamp_r, color, -1)
-                cv2.circle(overlay, (lx, cy), lamp_r, (60, 60, 60), 2)
+                    color = (30, 30, 30)  # lamp off
+                cv2.circle(overlay, (lx, cy), lamp_r, color, -1)   # lamp fill
+                cv2.circle(overlay, (lx, cy), lamp_r, (60, 60, 60), 2)  # lamp ring
 
         fps_frames += 1
         now = time.time()
@@ -987,7 +606,7 @@ def main():
             fps_frames = 0
             fps_last_t = now
 
-        # Top-Right: FPS + Laps/Race-Status
+        # Top-right: FPS + lap/race status
         if show_hud:
             if current_mode is not None:
                 tr_lines: List[str] = [
@@ -1004,7 +623,7 @@ def main():
                 tr_lines.append(f"Laps {RACE_LAPS}")
             tr_widths = [
                 cv2.getTextSize(t, hud.FONT, hud.scale, hud.thickness)[0][0]
-                for t in tr_lines]
+                for t in tr_lines]  # measure text for panel sizing
             tr_w = max(tr_widths) + 2 * hud.pad
             tr_h = len(tr_lines) * hud.line_h + 2 * hud.pad
             tr_x = overlay.shape[1] - tr_w - 10
@@ -1017,7 +636,7 @@ def main():
                             cv2.LINE_AA)
                 tr_cursor += hud.line_h
 
-        # Bottom: Hilfe-Zeilen — gesplittet damit sie ins Fenster passen
+        # Bottom: help text — split across lines to fit the window width
         if show_hud:
             help_lines: List[str] = []
             if source == "sim":
@@ -1031,13 +650,13 @@ def main():
             else:
                 h_hint = "h=hires"
             help_lines.append(
-                f"g=gates  k=kontrast  a=adjust  c=roi  {h_hint}")
+                f"g=gates  k=contrast  a=adjust  c=roi  {h_hint}")
             help_lines.append(
                 "s=start  n=new-race  Left/Right=laps  p=pause  t=clear-trails")
             help_lines.append("f=fullscreen  i=hud  q=quit")
             h_widths = [
                 cv2.getTextSize(t, hud.FONT, hud.scale, hud.thickness)[0][0]
-                for t in help_lines]
+                for t in help_lines]  # measure text for panel sizing
             h_w = max(h_widths) + 2 * hud.pad
             h_h = len(help_lines) * hud.line_h + 2 * hud.pad
             h_x = 10
@@ -1050,15 +669,15 @@ def main():
                             cv2.LINE_AA)
                 hy += hud.line_h
 
-        # Picker folgt Maus; nach 10s Inaktivität (oder Maus außerhalb)
-        # wird das Panel ausgeblendet.
+        # HSV color picker follows the mouse; hidden after 10 s of inactivity
+        # or when the cursor leaves the frame.
         mx, my = mouse_state["x"], mouse_state["y"]
         F_H, F_W = frame.shape[:2]
         mouse_active = (t - mouse_state["last_move_t"]) < 10.0
         if (show_hud and mouse_active
                 and 0 <= mx < F_W and 0 <= my < F_H):
             bgr = frame[my, mx]
-            hsv_px = cv2.cvtColor(
+            hsv_px = cv2.cvtColor(        # single-pixel BGR→HSV for the picker readout
                 np.array([[bgr]], dtype=np.uint8),
                 cv2.COLOR_BGR2HSV)[0, 0]
             pick_lines = [
@@ -1068,12 +687,12 @@ def main():
             p_widths = [
                 cv2.getTextSize(t, hud.FONT, hud.scale, hud.thickness)[0][0]
                 for t in pick_lines]
-            sw = hud.line_h  # Farb-Swatch quadratisch, Schrifthöhe
+            sw = hud.line_h  # color swatch: square the height of one text line
             p_w = max(p_widths) + sw + 3 * hud.pad
             p_h = len(pick_lines) * hud.line_h + 2 * hud.pad
             cv2.drawMarker(overlay, (mx, my), (255, 255, 255),
-                           cv2.MARKER_CROSS, 14, 1, cv2.LINE_AA)
-            cv2.circle(overlay, (mx, my), 6, (0, 0, 0), 1, cv2.LINE_AA)
+                           cv2.MARKER_CROSS, 14, 1, cv2.LINE_AA)  # crosshair at cursor
+            cv2.circle(overlay, (mx, my), 6, (0, 0, 0), 1, cv2.LINE_AA)   # inner dot ring
             off = 16
             p_x = mx + off
             p_y = my + off
@@ -1087,9 +706,9 @@ def main():
             sx0 = p_x + hud.pad
             sy0 = p_y + hud.pad
             cv2.rectangle(overlay, (sx0, sy0), (sx0 + sw, sy0 + sw),
-                          (int(bgr[0]), int(bgr[1]), int(bgr[2])), -1)
+                          (int(bgr[0]), int(bgr[1]), int(bgr[2])), -1)  # color swatch fill
             cv2.rectangle(overlay, (sx0, sy0), (sx0 + sw, sy0 + sw),
-                          (80, 80, 80), 1)
+                          (80, 80, 80), 1)                               # swatch border
             py_cur = p_y + hud.pad + hud.line_h - 10
             tx = sx0 + sw + hud.pad
             for text in pick_lines:
@@ -1100,7 +719,7 @@ def main():
         perf.mark("hud", perf.now() - _t_hud)
 
         with perf.timed("imshow"):
-            cv2.imshow(WINDOW, overlay)
+            cv2.imshow(WINDOW, overlay)  # display the composite overlay frame
 
         for name in car_names:
             gp = global_positions[name]
@@ -1109,7 +728,7 @@ def main():
 
         perf.tick()
 
-        key = cv2.waitKey(1) & 0xFF
+        key = cv2.waitKey(1) & 0xFF  # poll keyboard; 1 ms timeout caps CPU usage
         if key == 255 and pending_key != 255:
             key = pending_key
         if key in (27, ord("q")):
@@ -1122,7 +741,7 @@ def main():
         elif key == ord("p"):
             paused = not paused
         elif key == ord("n"):
-            # Log speichern bevor Reset
+            # Save the log before resetting
             events_df = lap_tracker.to_dataframe()
             if not events_df.empty:
                 reset_ts = time.strftime("%Y%m%d_%H%M%S")
@@ -1133,8 +752,8 @@ def main():
                 summary.to_csv(sum_path, index=False)
                 print(f"[reset] saved {ev_path}")
                 print(summary.to_string(index=False))
-            # Timing + Trails reset, Gates bleiben. Auch Race-Status zurück,
-            # damit Left/Right-Rundenlimit wieder funktioniert.
+            # Reset timing + trails; keep gates. Also reset race state so the
+            # Left/Right lap-limit keys work again before the next race.
             lap_tracker = LapTracker(car_names, num_gates=lap_tracker.num_gates)
             for tr in trails.values():
                 tr.clear()
@@ -1184,7 +803,7 @@ def main():
                 print("[roi] click 4 corners (c to cancel)")
         elif key == ord("a"):
             if adjust_open:
-                cv2.destroyWindow(ADJUST_WIN)
+                cv2.destroyWindow(ADJUST_WIN)  # close adjust window
                 adjust_open = False
                 print("[adjust] OFF")
             else:
@@ -1192,7 +811,7 @@ def main():
                 cv2.resizeWindow(ADJUST_WIN, 560, 520)
                 for name, _default, maxv in ADJUST_SLIDERS:
                     cv2.createTrackbar(name, ADJUST_WIN, adjust_vals[name],
-                                       maxv, lambda _v: None)
+                                       maxv, lambda _v: None)  # slider; callback unused
                 adjust_open = True
                 print("[adjust] ON — 100=neutral")
         elif key == ord("g"):
@@ -1208,8 +827,8 @@ def main():
                             "models/digits.pt")
                         print("[gates] loaded models/digits.pt")
                     except FileNotFoundError:
-                        print("[gates] models/digits.pt fehlt — "
-                              "train_digits.py ausführen")
+                        print("[gates] models/digits.pt not found — "
+                              "run train_digits.py first")
                 if digit_classifier is not None:
                     for g in gates:
                         classify_gate_digit(digit_classifier, frame, g)
@@ -1228,7 +847,7 @@ def main():
                         print(f"[gates] using {n} ordered gates, "
                               f"timing reset")
                 panel = build_crops_panel(frame, gates)
-                cv2.imshow("Gate Crops", panel)
+                cv2.imshow("Gate Crops", panel)  # debug panel showing all gate crops
             cur_res = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
                        int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
             _save_gates(gates, source, resolution=cur_res)
@@ -1265,10 +884,10 @@ def main():
             if hasattr(cap, "reverse"):
                 cap.reverse()
                 print("[sim] reversed direction")
-        elif key == 82 and hasattr(cap, "speed_up"):  # arrow up
+        elif key == 82 and hasattr(cap, "speed_up"):   # arrow up
             cap.speed_up()
             print(f"[sim] faster — period={cap._period:.2f}s")
-        elif key == 84 and hasattr(cap, "speed_down"):  # arrow down
+        elif key == 84 and hasattr(cap, "speed_down"): # arrow down
             cap.speed_down()
             print(f"[sim] slower — period={cap._period:.2f}s")
         elif key == 83 and not race_active and countdown_t0 is None:  # arrow right
@@ -1279,7 +898,7 @@ def main():
             print(f"[race] laps={RACE_LAPS}")
         elif key == ord("f"):
             fullscreen = not fullscreen
-            cv2.setWindowProperty(
+            cv2.setWindowProperty(                    # toggle fullscreen mode
                 WINDOW, cv2.WND_PROP_FULLSCREEN,
                 cv2.WINDOW_FULLSCREEN if fullscreen else cv2.WINDOW_NORMAL,
             )
@@ -1296,7 +915,7 @@ def main():
 
     log_f.close()
     cap.release()
-    cv2.destroyAllWindows()
+    cv2.destroyAllWindows()  # close all OpenCV windows
     print(f"[done] log saved: {log_path}")
 
     events_df = lap_tracker.to_dataframe()
