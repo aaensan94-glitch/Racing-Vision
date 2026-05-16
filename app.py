@@ -1,3 +1,10 @@
+"""Application state and keyboard dispatcher.
+
+Defines AppState (UI flags, gate list, capture handle, mouse state) and the
+handle_key() dispatcher that maps key presses to system actions such as gate
+calibration, race control, ROI editing, and camera mode switching.
+"""
+
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple

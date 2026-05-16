@@ -1,3 +1,11 @@
+"""Race state management and gate-crossing logic.
+
+Defines RaceState (trails, lap times, countdown) and the two per-frame
+functions that advance it: tick_countdown() drives the traffic-light sequence,
+and process_gate_crossings() detects when a car passes a gate, updates speed,
+appends trail points, and triggers lap/finish announcements.
+"""
+
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple

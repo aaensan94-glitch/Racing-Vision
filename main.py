@@ -1,3 +1,10 @@
+"""Entry point for the racing vision system.
+
+Initializes all subsystems (camera, tracker, HUD, race state) and runs the
+main frame loop: capture → filter → track → gate crossing → overlay → HUD →
+display → log.  Cleanup and session persistence happen on exit.
+"""
+
 import time
 from typing import Dict, Optional, Tuple
 

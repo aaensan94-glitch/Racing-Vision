@@ -98,15 +98,21 @@ light and avoid hard shadows over the track.
 
 | File | Description |
 |------|-------------|
-| `main.py` | Main loop, overlay/HUD, key handling, race logic. |
-| `vision.py` | Marker tracking (HSV + morphology). |
-| `gates.py` | Gate detection — circles, lines, pairing, OCR crop, orientation, classification, crossing check. |
-| `digits.py` | MNIST-style CNN for gate digit inference. |
-| `train_digits.py` | Training script; writes `models/digits.pt`. |
+| `main.py` | Entry point — initialises subsystems and runs the frame loop. |
+| `app.py` | `AppState` (UI flags, gates, capture, mouse) and keyboard dispatcher. |
+| `race.py` | `RaceState` (trails, lap times, countdown) and gate-crossing logic. |
+| `camera.py` | Camera discovery, mode selection, threaded capture, mode switching. |
+| `session.py` | Load/save session config and race-log CSVs. |
+| `hud.py` | All drawing helpers — panels, trails, overlays, HSV picker. |
+| `vision.py` | HSV marker tracking, frame filters (brightness, gamma, ROI mask). |
+| `gates.py` | Gate detection, digit classification, ordering, crossing check, I/O. |
+| `perf.py` | Block-level frame-time profiler. |
 | `timing.py` | Lap counting, best times, sector splits, gate event log. |
 | `geometry.py` | Segment intersection, point–segment distance, Catmull-Rom spline. |
-| `sound.py` | Low-latency PCM sounds + espeak-ng TTS, both in worker threads with queues. |
-| `sim.py` | Simulator camera (duck-typed `cv2.VideoCapture`). |
+| `sound.py` | Low-latency PCM sounds and espeak-ng TTS in background threads. |
+| `sim.py` | Simulator camera — drop-in replacement for a real webcam. |
+| `digits.py` | MNIST-style CNN for gate digit inference. |
+| `train_digits.py` | Training script; writes `models/digits.pt`. |
 
 ## Config files
 

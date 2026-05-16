@@ -1,3 +1,10 @@
+"""Geometry primitives for trail and gate-crossing calculations.
+
+Provides segment intersection, point-to-segment distance, Catmull-Rom spline
+evaluation, and trail_gate_xpt() which finds the exact crossing point where a
+car's smoothed trail passes through a gate segment.
+"""
+
 import math
 from typing import List, Optional, Tuple
 

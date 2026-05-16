@@ -1,3 +1,10 @@
+"""Gate detection, digit classification, ordering, crossing check, and I/O.
+
+Detects hand-drawn gates (circle posts + connecting line) via Hough transforms,
+classifies the gate digit with an MNIST-style CNN, orders gates into a sequence,
+checks per-frame gate crossings, and persists calibration to configs/gates.json.
+"""
+
 import json
 import os
 from dataclasses import dataclass

@@ -1,3 +1,11 @@
+"""Block-level frame-time profiler.
+
+Perf accumulates named timing samples via the timed() context manager and the
+mark() / now() helpers, then prints a per-block summary on tick() once per
+second.  Used in the main loop to measure capture, filter, vision, and HUD
+costs without introducing external dependencies.
+"""
+
 import time
 from contextlib import contextmanager
 from typing import Dict

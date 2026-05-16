@@ -1,3 +1,9 @@
+"""Session and race-log persistence.
+
+Manages per-source session JSON files (ROI, filter values, lap limit) and
+writes position-log, gate-event, and lap-summary CSVs to the logs/ directory.
+"""
+
 import csv
 import json
 import os

@@ -1,3 +1,11 @@
+"""HSV marker tracking and frame pre-processing.
+
+MultiTracker runs per-car HSV + morphology detection each frame.  The module
+also provides apply_image_adjustments() (brightness / contrast / gamma /
+saturation) and apply_roi_mask() (4-point polygon crop) used in the main loop
+before tracking.
+"""
+
 import json
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple

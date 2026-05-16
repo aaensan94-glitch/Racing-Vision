@@ -1,3 +1,11 @@
+"""Camera discovery, capture, and mode switching.
+
+Provides ThreadedCapture (background-thread frame grabber), camera scanning
+via /sys/class/video4linux, v4l2-ctl mode enumeration, and helpers to open a
+capture at a specific mode, set up the initial capture on startup, and toggle
+between race (low-res/high-FPS) and calibration (high-res) modes at runtime.
+"""
+
 import os
 import re
 import subprocess

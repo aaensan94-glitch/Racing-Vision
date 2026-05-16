@@ -1,3 +1,11 @@
+"""HUD drawing helpers for the racing vision overlay.
+
+Contains all OpenCV drawing routines: info panel, status panel, help panel,
+HSV colour picker, trail rendering, traffic-light overlay, gate flash,
+car markers, ROI polygon, and the live Adjust window.  Also provides
+HudConfig (font, layout) and build_help_lines() for the key-binding footer.
+"""
+
 import json
 from collections import deque
 from typing import Any, Dict, Deque, List, Optional, Tuple
