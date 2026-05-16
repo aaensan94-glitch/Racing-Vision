@@ -7,12 +7,14 @@ from typing import Dict, Deque, List, Tuple, Optional
 import cv2
 import numpy as np
 
-from camera import (CamMode, ThreadedCapture, open_capture, list_v4l2_modes,
+from camera import (CamMode, open_capture, list_v4l2_modes,
                     pick_default_modes, prompt_camera_choice)
 from session import (LOGS_DIR, HUD_CFG_PATH, CARS_CFG_PATH,
                      _load_session, _save_session, _load_gates, _save_gates,
                      _gates_path, _session_path)
-from hud import HudConfig, _make_histogram, _panel, draw_polyline
+from hud import (HudConfig, _make_histogram, _panel, draw_polyline,
+                 draw_trails, draw_traffic_light, draw_info_panel,
+                 draw_status_panel, draw_help_panel, draw_hsv_picker)
 from perf import Perf
 from vision import MultiTracker
 from gates import (detect_gates, draw_gates, build_crops_panel,
@@ -81,6 +83,114 @@ def _scale_gates_and_roi(gates: List[GateCandidate],
         g.radius_a = g.radius_a * (sx + sy) * 0.5
         g.radius_b = g.radius_b * (sx + sy) * 0.5
     return [(int(p[0] * sx), int(p[1] * sy)) for p in roi_pts]
+
+
+def _apply_image_adjustments(frame: np.ndarray,
+                              adjust_vals: Dict[str, int]) -> np.ndarray:
+    """Applies brightness, contrast, gamma, and saturation adjustments to a frame.
+
+    All sliders are neutral at 100. Returns the original frame unchanged when
+    all values are at neutral so the fast path avoids unnecessary copies.
+
+    Args:
+        frame: BGR input frame.
+        adjust_vals: Dict with keys Brightness, Contrast, Gamma, Saturation
+            (integer slider values; 100 = neutral).
+
+    Returns:
+        Adjusted BGR frame (may be a new array or the original).
+    """
+    b = adjust_vals["Brightness"]
+    c = adjust_vals["Contrast"]
+    gm = adjust_vals["Gamma"]
+    sa = adjust_vals["Saturation"]
+    if (b, c, gm, sa) == (100, 100, 100, 100):
+        return frame
+    frame = cv2.convertScaleAbs(frame, alpha=c / 100.0,
+                                beta=float(b - 100))  # brightness/contrast
+    gamma = max(0.1, gm / 100.0)
+    lut = np.clip((np.arange(256) / 255.0) ** (1.0 / gamma) * 255,
+                  0, 255).astype(np.uint8)
+    frame = cv2.LUT(frame, lut)  # apply gamma correction via lookup table
+    if sa != 100:
+        hsv_img = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV).astype(np.int32)
+        hsv_img[..., 1] = np.clip(hsv_img[..., 1] * sa / 100, 0, 255)
+        frame = cv2.cvtColor(hsv_img.astype(np.uint8), cv2.COLOR_HSV2BGR)
+    return frame
+
+
+def _apply_roi_mask(frame: np.ndarray,
+                    roi_pts: List[Tuple[int, int]]) -> np.ndarray:
+    """Masks the frame to the ROI polygon; returns the original if no ROI set.
+
+    Args:
+        frame: BGR input frame.
+        roi_pts: List of four (x, y) polygon corners, or fewer if not yet set.
+
+    Returns:
+        Masked frame (new array) or the original frame when roi_pts has < 4 points.
+    """
+    if len(roi_pts) != 4:
+        return frame
+    mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+    cv2.fillPoly(mask, [np.array(roi_pts, dtype=np.int32)], 255)  # polygon ROI mask
+    return cv2.bitwise_and(frame, frame, mask=mask)
+
+
+def _clear_car_state(car_names: List[str], trails, lap_trail, best_trail,
+                     prev, speed, last_gate_hit, last_gate_flash,
+                     race_finished, armed_before) -> None:
+    """Resets all per-car mutable state in place (trails, timing, flags).
+
+    Args:
+        car_names: List of car names to reset.
+        trails: Full position history deques per car.
+        lap_trail: Current-lap path lists per car.
+        best_trail: Best-lap path lists per car.
+        prev: Previous position/timestamp tuples per car.
+        speed: Speed scalars per car.
+        last_gate_hit: Last gate-hit timestamps per car.
+        last_gate_flash: Last gate-flash (timestamp, gate index) per car.
+        race_finished: Finished flags per car.
+        armed_before: Armed-before flags per car.
+    """
+    for tr in trails.values():
+        tr.clear()
+    for name in car_names:
+        lap_trail[name].clear()
+        best_trail[name].clear()
+        prev[name] = None
+        speed[name] = 0.0
+        last_gate_hit[name] = {}
+        last_gate_flash[name] = (0.0, -1)
+        race_finished[name] = False
+        armed_before[name] = False
+
+
+def _save_race_logs(lap_tracker, logs_dir: str, ts: str,
+                    tag: str = "done") -> None:
+    """Saves gate-event and lap-summary CSVs for the current race session.
+
+    Does nothing when the lap tracker has no events recorded yet.
+
+    Args:
+        lap_tracker: LapTracker instance with the current race data.
+        logs_dir: Directory path where CSV files are written.
+        ts: Timestamp string used in the file names (e.g. ``"20240101_120000"``).
+        tag: Log prefix printed with each saved path (e.g. ``"done"``
+            or ``"reset"``).
+    """
+    events_df = lap_tracker.to_dataframe()
+    if events_df.empty:
+        return
+    ev_path = os.path.join(logs_dir, f"gates_{ts}.csv")
+    sum_path = os.path.join(logs_dir, f"laps_{ts}.csv")
+    summary = lap_tracker.summary()
+    events_df.to_csv(ev_path, index=False)
+    summary.to_csv(sum_path, index=False)
+    print(f"[{tag}] gate events: {ev_path}")
+    print(f"[{tag}] lap summary: {sum_path}")
+    print(summary.to_string(index=False))
 
 
 def main():
@@ -266,24 +376,14 @@ def main():
                 countdown_beeps = lit
                 print(f"[countdown] {4 - lit}...")
             if lit >= 4 and countdown_beeps < 4:
-                # GO — reset like 'n' but skip the log (no data yet)
                 sound.play_go()
                 countdown_beeps = 4
                 race_active = True
                 lap_tracker = LapTracker(car_names,
                                          num_gates=lap_tracker.num_gates)
-                for tr in trails.values():
-                    tr.clear()
-                for name in car_names:
-                    lap_trail[name].clear()
-                    best_trail[name].clear()
-
-                    prev[name] = None
-                    speed[name] = 0.0
-                    last_gate_hit[name] = {}
-                    last_gate_flash[name] = (0.0, -1)
-                    race_finished[name] = False
-                    armed_before[name] = False
+                _clear_car_state(car_names, trails, lap_trail, best_trail,
+                                 prev, speed, last_gate_hit, last_gate_flash,
+                                 race_finished, armed_before)
                 countdown_t0 = None
                 print(f"[race] GO! {RACE_LAPS} laps")
 
@@ -291,50 +391,26 @@ def main():
             if adjust_open:
                 for name, _d, _m in ADJUST_SLIDERS:
                     adjust_vals[name] = cv2.getTrackbarPos(name, ADJUST_WIN)  # read slider value
-            b = adjust_vals["Brightness"]
-            c_ = adjust_vals["Contrast"]
-            gm = adjust_vals["Gamma"]
-            sa = adjust_vals["Saturation"]
-            if (b, c_, gm, sa) != (100, 100, 100, 100):
-                alpha = c_ / 100.0
-                beta = float(b - 100)
-                frame = cv2.convertScaleAbs(frame, alpha=alpha, beta=beta)  # brightness/contrast
-                gamma = max(0.1, gm / 100.0)
-                lut = np.clip((np.arange(256) / 255.0) ** (1.0 / gamma) * 255,
-                              0, 255).astype(np.uint8)
-                frame = cv2.LUT(frame, lut)  # apply gamma correction via lookup table
-                if sa != 100:
-                    hsv_img = cv2.cvtColor(
-                        frame, cv2.COLOR_BGR2HSV).astype(np.int32)  # convert for saturation edit
-                    hsv_img[..., 1] = np.clip(
-                        hsv_img[..., 1] * sa / 100, 0, 255)
-                    frame = cv2.cvtColor(
-                        hsv_img.astype(np.uint8), cv2.COLOR_HSV2BGR)  # convert back to BGR
+            frame = _apply_image_adjustments(frame, adjust_vals)
+
         if adjust_open:
             hist_canvas = _make_histogram(frame, w=520)
             header = np.full((150, 520, 3), 30, dtype=np.uint8)
             font = cv2.FONT_HERSHEY_SIMPLEX
             cv2.putText(header, "Slider  (100 = neutral)", (14, 26),
                         font, 0.7, (200, 200, 200), 2, cv2.LINE_AA)
-            labels = [("Brightness", b), ("Contrast", c_),
-                      ("Gamma", gm), ("Saturation", sa)]
             y = 56
-            for lbl, val in labels:
+            for lbl, _default, _ in ADJUST_SLIDERS:
+                val = adjust_vals[lbl]
                 col = (230, 230, 230) if val == 100 else (80, 200, 255)
                 cv2.putText(header, f"{lbl:<11s} {val:>3d}", (18, y),
                             font, 0.7, col, 2, cv2.LINE_AA)
                 y += 24
-            canvas = np.vstack([header, hist_canvas])
-            cv2.imshow(ADJUST_WIN, canvas)  # display adjust window with histogram
+            cv2.imshow(ADJUST_WIN, np.vstack([header, hist_canvas]))  # display adjust window
 
         with perf.timed("roi"):
-            roi_pts = mouse_state["roi_pts"]
-            if len(roi_pts) == 4:
-                mask = np.zeros(frame.shape[:2], dtype=np.uint8)
-                cv2.fillPoly(mask, [np.array(roi_pts, dtype=np.int32)], 255)  # polygon ROI mask
-                frame_proc = cv2.bitwise_and(frame, frame, mask=mask)          # apply mask to frame
-            else:
-                frame_proc = frame
+            frame_proc = _apply_roi_mask(frame, mouse_state["roi_pts"])
+
         with perf.timed("vision"):
             positions = tracker.update(frame_proc, t)
         global_positions: Dict[str, Optional[Point]] = dict(positions)
@@ -466,6 +542,7 @@ def main():
         else:
             overlay = frame.copy()
 
+        roi_pts = mouse_state["roi_pts"]
         if roi_pts:
             roi_color = (0, 200, 255)
             for p in roi_pts:
@@ -504,30 +581,16 @@ def main():
 
         perf.mark("overlay_base", perf.now() - _t_overlay)
 
-        # Trails: history + best lap at 50% opacity; current lap fully opaque
         _t_trails = perf.now()
-        trail_layer = overlay.copy()
-        for name in car_names:
-            color = tracker.car(name).display_color_bgr()
-            if len(trails[name]) >= 2:
-                draw_polyline(trail_layer, list(trails[name]),
-                              color=color, thickness=1, closed=False)
-            if len(best_trail[name]) >= 2:
-                draw_polyline(trail_layer, best_trail[name],
-                              color=color, thickness=3, closed=False)
-        cv2.addWeighted(trail_layer, 0.5, overlay, 0.5, 0, overlay)  # blend trail layer at 50%
-        for name in car_names:
-            color = tracker.car(name).display_color_bgr()
-            if len(lap_trail[name]) >= 2:
-                draw_polyline(overlay, lap_trail[name],
-                              color=color, thickness=3, closed=False)
+        colors = {name: tracker.car(name).display_color_bgr() for name in car_names}
+        draw_trails(overlay, car_names, trails, best_trail, lap_trail, colors)
         perf.mark("trails", perf.now() - _t_trails)
 
         _t_hud = perf.now()
-        # Collect per-car info lines first, then size the panel to fit
+        # Draw car markers and collect per-car info lines for the HUD panel.
         info_lines: List[Tuple[str, Tuple[int, int, int]]] = []
         for name in car_names:
-            color = tracker.car(name).display_color_bgr()
+            color = colors[name]
             gp = global_positions[name]
 
             if gp is not None:
@@ -560,44 +623,10 @@ def main():
                  color))
 
         if show_hud:
-            widths = [cv2.getTextSize(t, hud.FONT, hud.scale, hud.thickness)[0][0]
-                      for t, _ in info_lines]  # measure text for panel sizing
-            panel_w = (max(widths) if widths else 0) + 2 * hud.pad
-            panel_h = len(info_lines) * hud.line_h + 2 * hud.pad
-            _panel(overlay, 10, 10, panel_w, panel_h, hud.panel_alpha)
-            y_cursor = 10 + hud.pad + hud.line_h - 10
-            for text, col in info_lines:
-                cv2.putText(overlay, text, (10 + hud.pad, y_cursor),
-                            hud.FONT, hud.scale, col, hud.thickness,
-                            cv2.LINE_AA)
-                y_cursor += hud.line_h
+            draw_info_panel(overlay, hud, info_lines)
 
-        # Countdown / race traffic-light overlay
         if countdown_t0 is not None:
-            lit = min(int(t - countdown_t0) + 1, 4)  # 1→2→3→4(GO)
-            # horizontal traffic light — 3 lamps side by side
-            lamp_r = 45
-            gap = 16
-            w_total = 3 * (2 * lamp_r) + 4 * gap
-            h_total = 2 * lamp_r + 2 * gap
-            cx = overlay.shape[1] // 2
-            cy = overlay.shape[0] // 2
-            x0 = cx - w_total // 2
-            y0 = cy - h_total // 2
-            cv2.rectangle(overlay, (x0, y0), (x0 + w_total, y0 + h_total),
-                          (20, 20, 20), -1)   # housing fill
-            cv2.rectangle(overlay, (x0, y0), (x0 + w_total, y0 + h_total),
-                          (60, 60, 60), 3)    # housing border
-            for i in range(3):
-                lx = x0 + gap + lamp_r + i * (2 * lamp_r + gap)
-                if lit >= 4:
-                    color = (0, 200, 0)   # GO — all green
-                elif i < lit:
-                    color = (0, 0, 255)   # red lamp on
-                else:
-                    color = (30, 30, 30)  # lamp off
-                cv2.circle(overlay, (lx, cy), lamp_r, color, -1)   # lamp fill
-                cv2.circle(overlay, (lx, cy), lamp_r, (60, 60, 60), 2)  # lamp ring
+            draw_traffic_light(overlay, countdown_t0, t)
 
         fps_frames += 1
         now = time.time()
@@ -606,38 +635,11 @@ def main():
             fps_frames = 0
             fps_last_t = now
 
-        # Top-right: FPS + lap/race status
         if show_hud:
-            if current_mode is not None:
-                tr_lines: List[str] = [
-                    f"{fps:.1f} fps  "
-                    f"{current_mode[1]}x{current_mode[2]}@"
-                    f"{current_mode[3]:.0f}"
-                ]
-            else:
-                tr_lines = [f"{fps:.1f} fps"]
-            if race_active:
-                laps_done = max(lap_tracker.lap(n) for n in car_names)
-                tr_lines.append(f"Race {laps_done}/{RACE_LAPS}")
-            else:
-                tr_lines.append(f"Laps {RACE_LAPS}")
-            tr_widths = [
-                cv2.getTextSize(t, hud.FONT, hud.scale, hud.thickness)[0][0]
-                for t in tr_lines]  # measure text for panel sizing
-            tr_w = max(tr_widths) + 2 * hud.pad
-            tr_h = len(tr_lines) * hud.line_h + 2 * hud.pad
-            tr_x = overlay.shape[1] - tr_w - 10
-            tr_y = 10
-            _panel(overlay, tr_x, tr_y, tr_w, tr_h, hud.panel_alpha)
-            tr_cursor = tr_y + hud.pad + hud.line_h - 10
-            for text in tr_lines:
-                cv2.putText(overlay, text, (tr_x + hud.pad, tr_cursor),
-                            hud.FONT, hud.scale, hud.color, hud.thickness,
-                            cv2.LINE_AA)
-                tr_cursor += hud.line_h
+            laps_done = max(lap_tracker.lap(n) for n in car_names)
+            draw_status_panel(overlay, hud, fps, current_mode,
+                              race_active, laps_done, RACE_LAPS)
 
-        # Bottom: help text — split across lines to fit the window width
-        if show_hud:
             help_lines: List[str] = []
             if source == "sim":
                 help_lines.append("r=reverse  Up/Down=speed")
@@ -649,73 +651,17 @@ def main():
                           f"{other_mode[3]:.0f}")
             else:
                 h_hint = "h=hires"
-            help_lines.append(
-                f"g=gates  k=contrast  a=adjust  c=roi  {h_hint}")
-            help_lines.append(
-                "s=start  n=new-race  Left/Right=laps  p=pause  t=clear-trails")
-            help_lines.append("f=fullscreen  i=hud  q=quit")
-            h_widths = [
-                cv2.getTextSize(t, hud.FONT, hud.scale, hud.thickness)[0][0]
-                for t in help_lines]  # measure text for panel sizing
-            h_w = max(h_widths) + 2 * hud.pad
-            h_h = len(help_lines) * hud.line_h + 2 * hud.pad
-            h_x = 10
-            h_y = overlay.shape[0] - h_h - 10
-            _panel(overlay, h_x, h_y, h_w, h_h, hud.panel_alpha)
-            hy = h_y + hud.pad + hud.line_h - 10
-            for text in help_lines:
-                cv2.putText(overlay, text, (h_x + hud.pad, hy),
-                            hud.FONT, hud.scale, hud.color, hud.thickness,
-                            cv2.LINE_AA)
-                hy += hud.line_h
-
-        # HSV color picker follows the mouse; hidden after 10 s of inactivity
-        # or when the cursor leaves the frame.
-        mx, my = mouse_state["x"], mouse_state["y"]
-        F_H, F_W = frame.shape[:2]
-        mouse_active = (t - mouse_state["last_move_t"]) < 10.0
-        if (show_hud and mouse_active
-                and 0 <= mx < F_W and 0 <= my < F_H):
-            bgr = frame[my, mx]
-            hsv_px = cv2.cvtColor(        # single-pixel BGR→HSV for the picker readout
-                np.array([[bgr]], dtype=np.uint8),
-                cv2.COLOR_BGR2HSV)[0, 0]
-            pick_lines = [
-                f"({mx},{my})",
-                f"HSV {hsv_px[0]} {hsv_px[1]} {hsv_px[2]}",
+            help_lines += [
+                f"g=gates  k=contrast  a=adjust  c=roi  {h_hint}",
+                "s=start  n=new-race  Left/Right=laps  p=pause  t=clear-trails",
+                "f=fullscreen  i=hud  q=quit",
             ]
-            p_widths = [
-                cv2.getTextSize(t, hud.FONT, hud.scale, hud.thickness)[0][0]
-                for t in pick_lines]
-            sw = hud.line_h  # color swatch: square the height of one text line
-            p_w = max(p_widths) + sw + 3 * hud.pad
-            p_h = len(pick_lines) * hud.line_h + 2 * hud.pad
-            cv2.drawMarker(overlay, (mx, my), (255, 255, 255),
-                           cv2.MARKER_CROSS, 14, 1, cv2.LINE_AA)  # crosshair at cursor
-            cv2.circle(overlay, (mx, my), 6, (0, 0, 0), 1, cv2.LINE_AA)   # inner dot ring
-            off = 16
-            p_x = mx + off
-            p_y = my + off
-            if p_x + p_w > overlay.shape[1] - 6:
-                p_x = mx - p_w - off
-            if p_y + p_h > overlay.shape[0] - 6:
-                p_y = my - p_h - off
-            p_x = max(6, p_x)
-            p_y = max(6, p_y)
-            _panel(overlay, p_x, p_y, p_w, p_h, hud.panel_alpha)
-            sx0 = p_x + hud.pad
-            sy0 = p_y + hud.pad
-            cv2.rectangle(overlay, (sx0, sy0), (sx0 + sw, sy0 + sw),
-                          (int(bgr[0]), int(bgr[1]), int(bgr[2])), -1)  # color swatch fill
-            cv2.rectangle(overlay, (sx0, sy0), (sx0 + sw, sy0 + sw),
-                          (80, 80, 80), 1)                               # swatch border
-            py_cur = p_y + hud.pad + hud.line_h - 10
-            tx = sx0 + sw + hud.pad
-            for text in pick_lines:
-                cv2.putText(overlay, text, (tx, py_cur),
-                            hud.FONT, hud.scale, hud.color, hud.thickness,
-                            cv2.LINE_AA)
-                py_cur += hud.line_h
+            draw_help_panel(overlay, hud, help_lines)
+
+            draw_hsv_picker(overlay, frame,
+                            mouse_state["x"], mouse_state["y"],
+                            mouse_state["last_move_t"], t, hud)
+
         perf.mark("hud", perf.now() - _t_hud)
 
         with perf.timed("imshow"):
@@ -741,31 +687,14 @@ def main():
         elif key == ord("p"):
             paused = not paused
         elif key == ord("n"):
-            # Save the log before resetting
-            events_df = lap_tracker.to_dataframe()
-            if not events_df.empty:
-                reset_ts = time.strftime("%Y%m%d_%H%M%S")
-                ev_path = os.path.join(LOGS_DIR, f"gates_{reset_ts}.csv")
-                events_df.to_csv(ev_path, index=False)
-                summary = lap_tracker.summary()
-                sum_path = os.path.join(LOGS_DIR, f"laps_{reset_ts}.csv")
-                summary.to_csv(sum_path, index=False)
-                print(f"[reset] saved {ev_path}")
-                print(summary.to_string(index=False))
+            _save_race_logs(lap_tracker, LOGS_DIR,
+                            time.strftime("%Y%m%d_%H%M%S"), tag="reset")
             # Reset timing + trails; keep gates. Also reset race state so the
             # Left/Right lap-limit keys work again before the next race.
             lap_tracker = LapTracker(car_names, num_gates=lap_tracker.num_gates)
-            for tr in trails.values():
-                tr.clear()
-            for name in car_names:
-                lap_trail[name].clear()
-                best_trail[name].clear()
-                prev[name] = None
-                speed[name] = 0.0
-                last_gate_hit[name] = {}
-                last_gate_flash[name] = (0.0, -1)
-                race_finished[name] = False
-                armed_before[name] = False
+            _clear_car_state(car_names, trails, lap_trail, best_trail,
+                             prev, speed, last_gate_hit, last_gate_flash,
+                             race_finished, armed_before)
             race_active = False
             countdown_t0 = None
             countdown_beeps = 0
@@ -918,16 +847,7 @@ def main():
     cv2.destroyAllWindows()  # close all OpenCV windows
     print(f"[done] log saved: {log_path}")
 
-    events_df = lap_tracker.to_dataframe()
-    if not events_df.empty:
-        events_path = os.path.join(LOGS_DIR, f"gates_{ts}.csv")
-        summary_path = os.path.join(LOGS_DIR, f"laps_{ts}.csv")
-        events_df.to_csv(events_path, index=False)
-        summary = lap_tracker.summary()
-        summary.to_csv(summary_path, index=False)
-        print(f"[done] gate events: {events_path}")
-        print(f"[done] lap summary: {summary_path}")
-        print(summary.to_string(index=False))
+    _save_race_logs(lap_tracker, LOGS_DIR, ts, tag="done")
 
 
 if __name__ == "__main__":
