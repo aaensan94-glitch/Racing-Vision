@@ -1,3 +1,9 @@
+"""MNIST-style CNN for gate digit recognition.
+
+Provides DigitCNN (the model), preprocess() / preprocess_canvas() (image
+preparation), and DigitClassifier (inference wrapper with load() and predict()).
+"""
+
 from pathlib import Path
 from typing import Tuple
 

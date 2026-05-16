@@ -192,6 +192,19 @@ def play_go() -> None:
     _write(_go_bytes)
 
 
+# espeak-ng mispronounces colour names that don't match English phonics rules.
+_TTS_FIX = {
+    "cyan": "sigh-an",
+    "magenta": "ma-jenta",
+}
+
+
+def _fix_pronunciation(text: str) -> str:
+    for word, phonetic in _TTS_FIX.items():
+        text = text.replace(word, phonetic)
+    return text
+
+
 _tts_cmd: Optional[str] = None
 _tts_queue: Queue = Queue()
 _tts_thread: Optional[threading.Thread] = None
@@ -238,7 +251,7 @@ def say(text: str, priority: bool = False, speed: int = 300) -> None:
                 _tts_queue.get_nowait()
             except Exception:
                 break
-    _tts_queue.put((text, speed))
+    _tts_queue.put((_fix_pronunciation(text), speed))
 
 
 def tts_busy() -> bool:

@@ -7,7 +7,7 @@ appends trail points, and triggers lap/finish announcements.
 """
 
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import sound
@@ -181,9 +181,6 @@ def process_gate_crossings(
                                 name, g.digit, t)
                             if ev is not None and ev["lap_time_s"] is not None:
                                 sound.play_triple()
-                            else:
-                                sound.play()
-                            if ev is not None and ev["lap_time_s"] is not None:
                                 xpt = trail_gate_xpt(prev_pt, gp, g, trail_tail)
                                 if xpt is not None:
                                     state.lap_trail[name].append(xpt)
@@ -231,23 +228,25 @@ def process_gate_crossings(
                                     if all(state.race_finished.values()):
                                         state.race_active = False
                                         print("\n=== RACE COMPLETE ===")
-                            elif ev is not None and ev["gate"] == 0:
-                                # Gate 0 but invalid lap — reset the trail.
-                                # was_armed=False means the very first start
-                                # crossing — skip the audio announcement then.
-                                xpt = trail_gate_xpt(prev_pt, gp, g, trail_tail)
-                                if xpt is not None:
-                                    state.lap_trail[name].append(xpt)
-                                state.lap_trail[name].clear()
-                                if xpt is not None:
-                                    state.lap_trail[name].append(xpt)
-                                if was_armed:
-                                    sound.say(f"{name}, you messed up", speed=180)
-                            elif ev is not None and ev["sector_s"] is not None:
-                                delta = state.lap_tracker.sector_delta(name)
-                                delta_s = f"  [{delta}]" if delta else ""
-                                print(f"[sector] {name} gate {ev['gate']} "
-                                      f"sector={ev['sector_s']:.3f}s{delta_s}")
+                            else:
+                                sound.play()
+                                if ev is not None and ev["gate"] == 0:
+                                    # Gate 0 but invalid lap — reset the trail.
+                                    # was_armed=False means the very first start
+                                    # crossing — skip the audio announcement then.
+                                    xpt = trail_gate_xpt(prev_pt, gp, g, trail_tail)
+                                    if xpt is not None:
+                                        state.lap_trail[name].append(xpt)
+                                    state.lap_trail[name].clear()
+                                    if xpt is not None:
+                                        state.lap_trail[name].append(xpt)
+                                    if was_armed:
+                                        sound.say(f"{name}, you messed up", speed=180)
+                                elif ev is not None and ev["sector_s"] is not None:
+                                    delta = state.lap_tracker.sector_delta(name)
+                                    delta_s = f"  [{delta}]" if delta else ""
+                                    print(f"[sector] {name} gate {ev['gate']} "
+                                          f"sector={ev['sector_s']:.3f}s{delta_s}")
                         else:
                             sound.play_alarm()
                         did = g.digit if g.digit >= 0 else gi

@@ -419,6 +419,7 @@ def build_crops_panel(frame_bgr: np.ndarray, gates: List[GateCandidate],
     """
     if not gates:
         return np.zeros((tile, tile * 3, 3), dtype=np.uint8)
+    from digits import preprocess_canvas
     overview_w = tile * 2
     ocr_w = tile * 2
     sorted_gates = sorted(
@@ -448,7 +449,6 @@ def build_crops_panel(frame_bgr: np.ndarray, gates: List[GateCandidate],
         if raw is None:
             ocr_img = None
         else:
-            from digits import preprocess_canvas
             canvas = preprocess_canvas(raw)
             ocr_img = cv2.cvtColor(canvas, cv2.COLOR_GRAY2BGR)  # grayscale to BGR for stacking
         if ocr_img is None or ocr_img.size == 0:
@@ -556,7 +556,7 @@ def _check_segment(a: Point, b: Point, gate: GateCandidate) -> int:
 
 
 def gate_crossed(prev: Point, curr: Point, gate: GateCandidate,
-                 trail: List[Point] = None, spline_n: int = 10) -> int:
+                 trail: Optional[List[Point]] = None, spline_n: int = 10) -> int:
     """Checks whether the car path crosses a gate between two positions.
 
     If the trail has at least 3 prior points, a Catmull-Rom spline is used

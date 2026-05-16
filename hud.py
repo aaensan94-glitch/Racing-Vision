@@ -7,7 +7,6 @@ HudConfig (font, layout) and build_help_lines() for the key-binding footer.
 """
 
 import json
-from collections import deque
 from typing import Any, Dict, Deque, List, Optional, Tuple
 
 import cv2
