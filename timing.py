@@ -1,10 +1,11 @@
-"""Runden- und Sektoren-Timing pro Fahrzeug.
+"""Lap and sector timing per vehicle.
 
-Gate 0 = Start/Ziel. Sektoren werden zwischen aufeinanderfolgenden
-vorwärtigen Gate-Überquerungen in erwarteter Reihenfolge gemessen.
-Rückwärts-Crossings und Sequenz-Brüche werden ignoriert (die Runde bricht
-aber ab: bis zum nächsten 0-Gate läuft kein Timing)."""
-from dataclasses import dataclass, field
+Gate 0 is the start/finish line. Sectors are measured between consecutive
+forward gate crossings in the expected sequence. Reverse crossings and
+sequence breaks are ignored; however, the current lap is invalidated and
+no new lap time is recorded until the next gate-0 crossing.
+"""
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 import pandas as pd
@@ -13,31 +14,50 @@ from tabulate import tabulate
 
 @dataclass
 class _CarState:
-    expected: int = 0            # nächstes erwartetes Gate
-    lap: int = 0                 # aktuelle Rundennummer (0 = noch vor erstem Ziel)
+    expected: int = 0            # next expected gate index
+    lap: int = 0                 # current lap number (0 = before first finish crossing)
     lap_start_t: Optional[float] = None
     last_gate_t: Optional[float] = None
     last_lap_time: Optional[float] = None
     best_lap_time: Optional[float] = None
-    armed: bool = False          # True nachdem Gate 0 zum ersten Mal erreicht wurde
+    armed: bool = False          # True after gate 0 has been crossed at least once
 
 
 class LapTracker:
+    """Tracks lap times and sector splits for multiple cars.
+
+    Gate 0 acts as the start/finish line. A valid lap requires all gates to
+    be crossed in order before returning to gate 0.
+
+    Attributes:
+        num_gates: Total number of gates on the track (including gate 0).
+        events: Raw list of gate-crossing event dicts.
+    """
+
     def __init__(self, car_names: List[str], num_gates: int = 3):
         self.num_gates = num_gates
         self._state: Dict[str, _CarState] = {n: _CarState() for n in car_names}
         self.events: List[dict] = []
 
     def on_forward_crossing(self, car: str, gate_digit: int, t: float) -> Optional[dict]:
-        """Verarbeitet eine vorwärtige Gate-Überquerung.
+        """Processes a forward gate crossing and updates lap/sector state.
 
-        Regeln:
-        - Gate 0 startet IMMER eine neue Runde. Die eben beendete Runde zählt
-          nur wenn davor alle anderen Gates in Reihenfolge überfahren wurden
-          (d.h. expected == 0 beim 0-Crossing).
-        - Alle anderen Gates zählen nur wenn sie die erwartete Ziffer sind,
-          sonst werden sie ignoriert (State unverändert, Gate darf später
-          korrekt durchfahren werden).
+        Rules:
+          - Gate 0 always starts a new lap. The lap just ended counts only if
+            all other gates were crossed in order beforehand
+            (i.e. expected == 0 at the gate-0 crossing).
+          - All other gates count only if they match the expected digit;
+            otherwise they are silently ignored so the car can still cross
+            the gate correctly later.
+
+        Args:
+            car: Car name.
+            gate_digit: Digit label of the crossed gate.
+            t: Timestamp of the crossing in seconds.
+
+        Returns:
+            Event dict with keys (t, car, lap, gate, sector_s, lap_time_s),
+            or None if the crossing is out of sequence.
         """
         if gate_digit < 0:
             return None
@@ -46,7 +66,7 @@ class LapTracker:
         if gate_digit == 0:
             lap_time: Optional[float] = None
             sector_s: Optional[float] = None
-            ev_lap = st.lap  # Closing-Event behaelt den Lap der gerade endet
+            ev_lap = st.lap  # closing event keeps the lap number of the lap just ended
             if st.armed and st.expected == 0 and st.lap_start_t is not None:
                 lap_time = t - st.lap_start_t
                 sector_s = (t - st.last_gate_t
@@ -54,8 +74,8 @@ class LapTracker:
                 st.last_lap_time = lap_time
                 if st.best_lap_time is None or lap_time < st.best_lap_time:
                     st.best_lap_time = lap_time
-                st.lap += 1  # naechste Sektoren gehoeren zur neuen Runde
-            # neue Runde immer starten
+                st.lap += 1  # sectors from here belong to the new lap
+            # always start a new lap regardless of whether this one was valid
             st.lap_start_t = t
             st.last_gate_t = t
             st.expected = 1 % self.num_gates
@@ -65,7 +85,7 @@ class LapTracker:
             self.events.append(ev)
             return ev
 
-        # Non-zero Gate: nur wenn erwartet
+        # Non-zero gate: only count if it matches the expected sequence
         if gate_digit != st.expected:
             return None
 
@@ -78,29 +98,45 @@ class LapTracker:
         self.events.append(ev)
         return ev
 
-    # --- Read-only Zugriff fuer Overlay ---
+    # --- Read-only accessors for the overlay ---
+
     def lap(self, car: str) -> int:
+        """Returns the current completed lap count for the car."""
         return self._state[car].lap
 
     def last_lap_time(self, car: str) -> Optional[float]:
+        """Returns the last completed lap time in seconds, or None."""
         return self._state[car].last_lap_time
 
     def best_lap_time(self, car: str) -> Optional[float]:
+        """Returns the all-time best lap time in seconds, or None."""
         return self._state[car].best_lap_time
 
     def current_lap_elapsed(self, car: str, now: float) -> Optional[float]:
+        """Returns elapsed time of the current in-progress lap.
+
+        Args:
+            car: Car name.
+            now: Current timestamp in seconds.
+
+        Returns:
+            Elapsed seconds since the last gate-0 crossing, or None if not armed.
+        """
         st = self._state[car]
         if not st.armed or st.lap_start_t is None:
             return None
         return now - st.lap_start_t
 
-    # --- Auswertung ---
+    # --- Analysis ---
+
     def to_dataframe(self) -> pd.DataFrame:
+        """Returns all gate-crossing events as a DataFrame."""
         return pd.DataFrame(self.events,
                             columns=["t", "car", "lap", "gate",
                                      "sector_s", "lap_time_s"])
 
     def summary(self) -> pd.DataFrame:
+        """Returns a per-car summary with lap count, best lap, and mean lap time."""
         df = self.to_dataframe()
         if df.empty:
             return pd.DataFrame(columns=["car", "laps", "best_lap_s", "mean_lap_s"])
@@ -113,8 +149,15 @@ class LapTracker:
         return g.agg(laps="count", best_lap_s="min", mean_lap_s="mean").reset_index()
 
     def sector_delta(self, car: str) -> Optional[str]:
-        """Vergleicht die aktuellen Sektoren der laufenden Runde mit der
-        besten Runde. Gibt einen formatierten Einzeiler zurück."""
+        """Compares current-lap sector times against the best lap.
+
+        Args:
+            car: Car name.
+
+        Returns:
+            Formatted single-line string of per-sector and cumulative deltas,
+            or None if insufficient data.
+        """
         df = self.to_dataframe()
         if df.empty:
             return None
@@ -122,13 +165,13 @@ class LapTracker:
         completed_laps = cf[cf["lap_time_s"].notna()]
         if completed_laps.empty:
             return None
-        # beste Runde: Sektoren für gate > 0
+        # best lap: sectors for gate > 0
         best_lap_nr = completed_laps.loc[
             completed_laps["lap_time_s"].idxmin(), "lap"]
         best = (cf[(cf["lap"] == best_lap_nr) & (cf["gate"] > 0)]
                 .drop_duplicates(subset=["gate"], keep="last")
                 .set_index("gate")["sector_s"])
-        # aktuelle Runde = alles nach dem letzten gate-0-Event, nur gate > 0
+        # current lap = everything after the last gate-0 event, gate > 0
         gate0_times = cf[cf["gate"] == 0]["t"]
         if gate0_times.empty:
             return None
@@ -156,26 +199,32 @@ class LapTracker:
         return "  ".join(parts)
 
     def race_table(self, car: str) -> Optional[str]:
-        """Pivot-Tabelle: Runde × Sektor + Rundenzeit. Gibt formatierten
-        String zurück, oder None wenn keine Daten."""
+        """Returns a pivot table of lap × sector times as a formatted string.
+
+        Args:
+            car: Car name.
+
+        Returns:
+            Formatted table string, or None if no data is available.
+        """
         df = self.to_dataframe()
         if df.empty:
             return None
         cf = df[df["car"] == car].copy()
         if cf.empty:
             return None
-        # nur Runden die mindestens 1 Event haben
+        # only laps that have at least one sector event
         laps_with_sectors = cf[cf["sector_s"].notna()].copy()
         if laps_with_sectors.empty:
             return None
-        # Pivot: rows=lap, cols=gate -> sector_s
+        # pivot: rows=lap, cols=gate -> sector_s
         piv = laps_with_sectors.pivot_table(
             index="lap", columns="gate", values="sector_s", aggfunc="first")
         piv.columns = [f"S{int(c)}" for c in piv.columns]
-        # lap_time dazuhängen (aus gate 0 Events)
+        # append lap_time from gate-0 events
         lap_times = cf[cf["lap_time_s"].notna()].set_index("lap")["lap_time_s"]
         piv["total"] = lap_times
-        # delta zur besten Runde
+        # delta relative to the best lap
         if not lap_times.empty:
             best = lap_times.min()
             piv["delta"] = lap_times - best

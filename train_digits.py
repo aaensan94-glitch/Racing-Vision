@@ -27,7 +27,7 @@ def main():
     MODEL_DIR.mkdir(exist_ok=True)
     DATA_DIR.mkdir(exist_ok=True)
 
-    # Augmentation: leichte Rotation/Scale/Shift — robuster gegen Crop-Ungenauigkeit
+    # Augmentation: slight rotation/scale/shift for robustness against crop inaccuracies
     train_tf = transforms.Compose([
         transforms.RandomAffine(degrees=10, translate=(0.08, 0.08),
                                 scale=(0.9, 1.1)),

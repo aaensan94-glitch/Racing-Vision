@@ -1,5 +1,9 @@
-"""Low-Latency Sound-Trigger: hält einen persistenten aplay-Stream offen und
-schreibt bei jedem play() ein vorgerechnetes PCM-Sample direkt in stdin."""
+"""Low-latency sound trigger.
+
+Keeps a persistent aplay/pw-cat stream open and writes pre-built PCM samples
+directly to stdin on each play() call. Text-to-speech runs in a separate
+worker thread via espeak-ng.
+"""
 import shutil
 import subprocess
 import threading
@@ -12,7 +16,7 @@ SAMPLE_RATE = 22050
 DURATION_S = 0.06
 FREQ_HZ = 1200
 ALARM_DURATION_S = 0.18
-ALARM_FREQ_HZ = 220  # tief + Square → kratzig
+ALARM_FREQ_HZ = 220  # low + square wave → harsh buzz
 
 FINISH_DURATION_S = 1.5
 FINISH_FREQ_HZ = 1600
@@ -23,14 +27,14 @@ _proc: Optional[subprocess.Popen] = None
 def _build_click() -> bytes:
     n = int(SAMPLE_RATE * DURATION_S)
     t = np.arange(n) / SAMPLE_RATE
-    env = np.exp(-t * 40.0)  # schneller Decay → knackig
+    env = np.exp(-t * 40.0)  # fast decay → sharp click
     wave = np.sin(2 * np.pi * FREQ_HZ * t) * env
     pcm = (wave * 32767).astype(np.int16)
     return pcm.tobytes()
 
 
 def _build_triple() -> bytes:
-    """3 schnelle Clicks hintereinander für Start/Ziel-Gate bei gültiger Runde."""
+    """Three rapid clicks for a valid start/finish gate crossing."""
     click = _build_click()
     gap = np.zeros(int(SAMPLE_RATE * 0.04), dtype=np.int16).tobytes()
     return click + gap + click + gap + click
@@ -39,7 +43,7 @@ def _build_triple() -> bytes:
 def _build_alarm() -> bytes:
     n = int(SAMPLE_RATE * ALARM_DURATION_S)
     t = np.arange(n) / SAMPLE_RATE
-    # Square + 30 Hz Tremolo → kratziger Buzz, schneller Attack, kurzer Decay
+    # square wave + 30 Hz tremolo → harsh buzz; fast attack, short decay
     square = np.sign(np.sin(2 * np.pi * ALARM_FREQ_HZ * t))
     tremolo = 0.5 + 0.5 * np.sign(np.sin(2 * np.pi * 30.0 * t))
     env = np.minimum(1.0, t * 80.0) * np.exp(-t * 6.0)
@@ -49,9 +53,8 @@ def _build_alarm() -> bytes:
 
 
 def _build_finish() -> bytes:
-    """Aufsteigende Fanfare: 3 Töne + langer Schlusston (~1.5s)."""
+    """Rising fanfare: three short tones followed by a long closing note (~1.5 s)."""
     parts = []
-    # 3 kurze aufsteigende Töne
     for freq in (800, 1200, 1600):
         dur = 0.15
         n = int(SAMPLE_RATE * dur)
@@ -60,21 +63,20 @@ def _build_finish() -> bytes:
         wave = np.sin(2 * np.pi * freq * t) * env
         parts.append((wave * 32767).astype(np.int16))
         parts.append(np.zeros(int(SAMPLE_RATE * 0.03), dtype=np.int16))
-    # Langer Schlusston
+    # long closing tone
     dur = 0.8
     n = int(SAMPLE_RATE * dur)
     t = np.arange(n) / SAMPLE_RATE
     env = np.minimum(1.0, t * 30.0) * np.exp(-t * 2.0)
     wave = np.sin(2 * np.pi * 1600 * t) * env
-    # Leichte Obertöne für Fülle
-    wave += 0.3 * np.sin(2 * np.pi * 2400 * t) * env
-    wave = wave / wave.max()  # normalisieren
+    wave += 0.3 * np.sin(2 * np.pi * 2400 * t) * env  # slight overtone for fullness
+    wave = wave / wave.max()  # normalize to prevent clipping
     parts.append((wave * 32767).astype(np.int16))
     return np.concatenate(parts).tobytes()
 
 
 def _build_countdown() -> bytes:
-    """Mario-Kart-Style Countdown-Beep: tiefer, kurzer Ton."""
+    """Mario Kart-style countdown beep: low, short tone."""
     n = int(SAMPLE_RATE * 0.15)
     t = np.arange(n) / SAMPLE_RATE
     env = np.ones_like(t)
@@ -85,7 +87,7 @@ def _build_countdown() -> bytes:
 
 
 def _build_go() -> bytes:
-    """Mario-Kart-Style GO: höher und länger als Countdown."""
+    """Mario Kart-style GO tone: higher and longer than the countdown beep."""
     n = int(SAMPLE_RATE * 0.35)
     t = np.arange(n) / SAMPLE_RATE
     env = np.ones_like(t)
@@ -161,26 +163,32 @@ def _write(buf: Optional[bytes]) -> None:
 
 
 def play() -> None:
+    """Plays a single gate-crossing click."""
     _write(_click_bytes)
 
 
 def play_triple() -> None:
+    """Plays the triple-click sound for a valid lap completion."""
     _write(_triple_bytes)
 
 
 def play_alarm() -> None:
+    """Plays the wrong-direction alarm buzz."""
     _write(_alarm_bytes)
 
 
 def play_finish() -> None:
+    """Plays the finish fanfare."""
     _write(_finish_bytes)
 
 
 def play_countdown() -> None:
+    """Plays one countdown beep."""
     _write(_countdown_bytes)
 
 
 def play_go() -> None:
+    """Plays the GO tone at race start."""
     _write(_go_bytes)
 
 
@@ -205,8 +213,16 @@ def _tts_worker() -> None:
 
 
 def say(text: str, priority: bool = False, speed: int = 300) -> None:
-    """Non-blocking queued TTS. Nachrichten werden nacheinander abgespielt.
-    priority=True leert die Queue vorher (für Finish-Ansagen)."""
+    """Queues a TTS announcement without blocking the main loop.
+
+    Messages are spoken in order. Use priority=True to flush pending
+    announcements first (for finish-line calls).
+
+    Args:
+        text: Text to speak.
+        priority: If True, clears the queue before adding this message.
+        speed: Speech rate in words per minute.
+    """
     global _tts_cmd, _tts_thread
     if _tts_cmd is None:
         _tts_cmd = shutil.which("espeak-ng") or shutil.which("espeak")
@@ -216,7 +232,7 @@ def say(text: str, priority: bool = False, speed: int = 300) -> None:
         _tts_thread = threading.Thread(target=_tts_worker, daemon=True)
         _tts_thread.start()
     if priority:
-        # Queue leeren damit Finish-Ansage sofort drankommt
+        # drain the queue so the finish announcement plays immediately
         while not _tts_queue.empty():
             try:
                 _tts_queue.get_nowait()
@@ -226,5 +242,5 @@ def say(text: str, priority: bool = False, speed: int = 300) -> None:
 
 
 def tts_busy() -> bool:
-    """True wenn gerade gesprochen wird oder Ansagen in der Queue sind."""
+    """Returns True if speech is in progress or announcements are queued."""
     return not _tts_queue.empty()

@@ -61,8 +61,18 @@ def segments_intersect(p1: Point, p2: Point, a: Point, b: Point) -> bool:
 
 def catmull_rom(p0: Point, p1: Point, p2: Point, p3: Point,
                 n: int = 10) -> List[Point]:
-    """n gleichmäßige Punkte auf dem Catmull-Rom Segment zwischen p1 und p2,
-    mit p0/p3 als Tangenten-Stützpunkte."""
+    """Returns n+1 evenly spaced points on the Catmull-Rom segment between p1 and p2.
+
+    Args:
+        p0: Control point before p1 (tangent support).
+        p1: Start of the interpolated segment.
+        p2: End of the interpolated segment.
+        p3: Control point after p2 (tangent support).
+        n: Number of intervals; n+1 points are returned.
+
+    Returns:
+        List of (x, y) points along the spline from p1 to p2.
+    """
     pts: List[Point] = []
     for i in range(n + 1):
         t = i / n

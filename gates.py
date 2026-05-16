@@ -8,7 +8,7 @@ from geometry import segments_intersect, point_segment_distance, catmull_rom
 
 Point = Tuple[float, float]
 
-# Hough-Parameter — experimentell anpassen
+# Hough detection parameters — tune these per camera/lighting
 CIRCLE_DP = 1.2
 CIRCLE_MIN_DIST = 30
 CIRCLE_PARAM1 = 100
@@ -22,12 +22,27 @@ LINE_THRESHOLD = 40
 LINE_MIN_LEN = 30
 LINE_MAX_GAP = 10
 
-# Endpunkt-Toleranz als Vielfaches des Kreisradius
+# Line endpoint tolerance as a multiple of the circle radius
 ENDPOINT_TOL = 1.5
 
 
 @dataclass
 class GateCandidate:
+    """Detected gate defined by two post circles and the connecting line.
+
+    Attributes:
+        post_a: Center of the digit (left/inner) post.
+        post_b: Center of the empty (right/outer) post.
+        radius_a: Radius of post_a in pixels.
+        radius_b: Radius of post_b in pixels.
+        line_p1: First endpoint of the detected line segment.
+        line_p2: Second endpoint of the detected line segment.
+        digit: Classified gate number (-1 if unclassified).
+        digit_confidence: Softmax confidence of the digit prediction.
+        digit_side: Which post carries the digit ("above", "below", or "").
+        forward: Unit vector pointing in the forward (legal) crossing direction.
+    """
+
     post_a: Point
     post_b: Point
     radius_a: float
@@ -37,12 +52,21 @@ class GateCandidate:
     digit: int = -1
     digit_confidence: float = 0.0
     digit_side: str = ""  # "above" | "below" | ""
-    forward: Point = (0.0, 0.0)  # Konventions-Vorwärtsrichtung (aus Gate-Rotation)
+    forward: Point = (0.0, 0.0)  # canonical forward direction from gate rotation
 
 
 def detect_circles(gray: np.ndarray) -> np.ndarray:
-    blurred = cv2.GaussianBlur(gray, (7, 7), 1.5)
-    circles = cv2.HoughCircles(
+    """Detects circular gate posts in a grayscale image.
+
+    Args:
+        gray: Grayscale input image.
+
+    Returns:
+        Array of shape (N, 3) with columns (cx, cy, radius),
+        or an empty array if no circles are found.
+    """
+    blurred = cv2.GaussianBlur(gray, (7, 7), 1.5)  # smooth to suppress noise before Hough
+    circles = cv2.HoughCircles(                      # gradient-based circle detection
         blurred, cv2.HOUGH_GRADIENT,
         dp=CIRCLE_DP, minDist=CIRCLE_MIN_DIST,
         param1=CIRCLE_PARAM1, param2=CIRCLE_PARAM2,
@@ -54,8 +78,17 @@ def detect_circles(gray: np.ndarray) -> np.ndarray:
 
 
 def detect_lines(gray: np.ndarray) -> np.ndarray:
-    edges = cv2.Canny(gray, CANNY_LOW, CANNY_HIGH)
-    lines = cv2.HoughLinesP(
+    """Detects line segments connecting gate posts.
+
+    Args:
+        gray: Grayscale input image.
+
+    Returns:
+        Array of shape (N, 4) with columns (x1, y1, x2, y2),
+        or an empty array if no lines are found.
+    """
+    edges = cv2.Canny(gray, CANNY_LOW, CANNY_HIGH)  # edge map for Hough line input
+    lines = cv2.HoughLinesP(                          # probabilistic Hough line segments
         edges, 1, np.pi / 180,
         threshold=LINE_THRESHOLD,
         minLineLength=LINE_MIN_LEN,
@@ -67,12 +100,23 @@ def detect_lines(gray: np.ndarray) -> np.ndarray:
 
 
 def pair_gates(circles: np.ndarray, lines: np.ndarray) -> List[GateCandidate]:
-    """Verbinde Linien, deren Endpunkte nahe zweier unterschiedlicher Kreiszentren liegen."""
+    """Pairs detected lines with circle pairs to form gate candidates.
+
+    A line is accepted as a gate if both endpoints lie within the tolerance
+    radius of two different circles.
+
+    Args:
+        circles: Output of detect_circles — shape (N, 3).
+        lines: Output of detect_lines — shape (M, 4).
+
+    Returns:
+        List of GateCandidate objects, one per unique circle pair.
+    """
     gates: List[GateCandidate] = []
     used_pairs = set()
 
     for (x1, y1, x2, y2) in lines:
-        best1 = None  # (idx, dist)
+        best1 = None  # (circle_index, distance)
         best2 = None
         for ci, (cx, cy, r) in enumerate(circles):
             tol = r * ENDPOINT_TOL
@@ -100,30 +144,52 @@ def pair_gates(circles: np.ndarray, lines: np.ndarray) -> List[GateCandidate]:
     return gates
 
 
-_clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+_clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))  # adaptive histogram equalizer
 
 
 def detect_gates(frame_bgr: np.ndarray, use_clahe: bool = False):
-    """Return (gates, circles, lines). Circles/lines sind alle Kandidaten (für Debug).
-    Gates werden so kanonisiert, dass post_a der dunklere Pfosten (mit Ziffer) ist."""
-    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    """Detects all gates in a frame and canonicalizes post order.
+
+    post_a is normalized to the darker (digit) post so downstream code can
+    assume a consistent left/right orientation.
+
+    Args:
+        frame_bgr: Full BGR camera frame.
+        use_clahe: If True, applies CLAHE contrast enhancement before detection.
+
+    Returns:
+        Tuple (gates, circles, lines) where circles and lines are all raw
+        candidates, useful for debug visualization.
+    """
+    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)  # convert to grayscale for Hough
     if use_clahe:
-        gray = _clahe.apply(gray)
+        gray = _clahe.apply(gray)  # enhance local contrast before circle/line detection
     circles = detect_circles(gray)
     lines = detect_lines(gray)
     gates = pair_gates(circles, lines)
     for g in gates:
         ma = _circle_fill_mean(gray, g.post_a[0], g.post_a[1], g.radius_a)
         mb = _circle_fill_mean(gray, g.post_b[0], g.post_b[1], g.radius_b)
-        if ma > mb:  # post_a heller (leer) → swap, damit Ziffer-Pfosten links/a ist
+        if ma > mb:  # post_a is brighter (empty) → swap so digit post is always post_a
             g.post_a, g.post_b = g.post_b, g.post_a
             g.radius_a, g.radius_b = g.radius_b, g.radius_a
     return gates, circles, lines
 
 
 def _circle_fill_mean(gray: np.ndarray, cx: float, cy: float, r: float) -> float:
-    """Mittlere Grauwert-Intensität im Kreisinneren (kleiner Schrumpfradius,
-    um Rand zu vermeiden). Hell = outline/leer, dunkel = gefüllt."""
+    """Returns the mean gray intensity inside a circle, shrunk to avoid the edge.
+
+    Bright = outline/empty post, dark = filled/digit post.
+
+    Args:
+        gray: Grayscale image.
+        cx: Circle center x.
+        cy: Circle center y.
+        r: Circle radius.
+
+    Returns:
+        Mean pixel intensity in [0, 255].
+    """
     h, w = gray.shape[:2]
     rr = max(2, int(r * 0.6))
     x0 = max(0, int(cx) - rr); x1 = min(w, int(cx) + rr + 1)
@@ -139,41 +205,75 @@ def _circle_fill_mean(gray: np.ndarray, cx: float, cy: float, r: float) -> float
 
 
 def _orient_posts(gray: np.ndarray, gate: GateCandidate):
-    """Gibt (left_post, right_post, left_r, right_r) zurück. Der hellere
-    (leere) Pfosten soll in Fahrtrichtung rechts liegen — d.h. bezüglich
-    der Rotation, die post_a links, post_b rechts legt, ist der hellere
-    Pfosten post_b."""
+    """Returns posts ordered so the digit post is on the left in track direction.
+
+    The brighter (empty) post should be on the right relative to the forward
+    direction, making the digit post always the left (post_a) post.
+
+    Args:
+        gray: Grayscale image.
+        gate: Gate candidate to orient.
+
+    Returns:
+        Tuple (left_post, right_post, left_r, right_r).
+    """
     ma = _circle_fill_mean(gray, gate.post_a[0], gate.post_a[1], gate.radius_a)
     mb = _circle_fill_mean(gray, gate.post_b[0], gate.post_b[1], gate.radius_b)
     if ma > mb:
-        # post_a ist heller (leer) → muss rechts sein → swap
+        # post_a is brighter (empty) → it must be on the right → swap
         return (gate.post_b, gate.post_a, gate.radius_b, gate.radius_a)
     return (gate.post_a, gate.post_b, gate.radius_a, gate.radius_b)
 
 
 def _rotate_for_gate(frame_bgr: np.ndarray, gate: GateCandidate):
-    """Rotiert den Frame so, dass die Pfostenverbindung horizontal liegt
-    und der leere (hellere) Pfosten rechts landet. Liefert
-    (rotated, mx, my, L, ra, rb, forward)."""
-    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    """Rotates the frame so the gate's post line is horizontal.
+
+    The empty (brighter) post lands on the right after rotation, giving a
+    canonical orientation for digit extraction.
+
+    Args:
+        frame_bgr: Full BGR frame.
+        gate: Gate candidate.
+
+    Returns:
+        Tuple (rotated, mx, my, L, ra, rb, forward) where mx/my are the gate
+        midpoint, L is the post separation, ra/rb are post radii, and forward
+        is the unit vector pointing in the legal crossing direction.
+    """
+    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)  # grayscale for brightness comparison
     (ax, ay), (bx, by), ra, rb = _orient_posts(gray, gate)
     dx, dy = bx - ax, by - ay
     L = float(np.hypot(dx, dy))
     mx, my = (ax + bx) / 2.0, (ay + by) / 2.0
     angle_deg = float(np.degrees(np.arctan2(dy, dx)))
-    # Forward-Richtung: senkrecht auf digit→leer, "von unten" im rotierten Frame
+    # forward direction: perpendicular to the post line, pointing "upward" in the rotated frame
     forward = (dy / L, -dx / L) if L > 1e-6 else (0.0, 0.0)
     h, w = frame_bgr.shape[:2]
-    M = cv2.getRotationMatrix2D((mx, my), angle_deg, 1.0)
-    rotated = cv2.warpAffine(frame_bgr, M, (w, h), flags=cv2.INTER_LINEAR,
+    M = cv2.getRotationMatrix2D((mx, my), angle_deg, 1.0)       # rotation matrix around gate midpoint
+    rotated = cv2.warpAffine(frame_bgr, M, (w, h),              # rotate image to align gate horizontally
+                             flags=cv2.INTER_LINEAR,
                              borderMode=cv2.BORDER_REPLICATE)
     return rotated, mx, my, L, float(ra), float(rb), forward
 
 
 def _roi_bounds(mx: float, my: float, L: float, ra: float, rb: float,
                 height_factor: float, w: int, h: int):
-    """Horizontal: inkl. äußerer Pfostenränder. Vertikal: crop_h oberhalb /
-    unterhalb der Linie."""
+    """Computes crop bounds for the region above and below the gate line.
+
+    Args:
+        mx: Gate midpoint x.
+        my: Gate midpoint y.
+        L: Post separation distance.
+        ra: Left post radius.
+        rb: Right post radius.
+        height_factor: Crop height relative to L.
+        w: Image width.
+        h: Image height.
+
+    Returns:
+        Tuple (x0, x1, y_up0, y_up1, y_dn0, y_dn1).
+    """
+    # horizontal: include outer post edges
     x0 = max(0, int(round(mx - L / 2 - ra)))
     x1 = min(w, int(round(mx + L / 2 + rb)))
     crop_h = max(1, int(L * height_factor))
@@ -185,8 +285,19 @@ def _roi_bounds(mx: float, my: float, L: float, ra: float, rb: float,
 
 def extract_gate_crops(frame_bgr: np.ndarray, gate: GateCandidate,
                        height_factor: float = 1.0):
-    """Oberhalb/unterhalb der Linie, horizontal über beide Pfosten hinweg.
-    below ist 180° gedreht."""
+    """Extracts the region above and below the gate line.
+
+    The below crop is returned rotated 180° so it reads in the same
+    orientation as the above crop.
+
+    Args:
+        frame_bgr: Full BGR frame.
+        gate: Gate candidate.
+        height_factor: Crop height as a fraction of the post separation.
+
+    Returns:
+        Tuple (above, below) as BGR arrays, or (None, None) if gate is too small.
+    """
     if np.hypot(gate.post_b[0] - gate.post_a[0],
                 gate.post_b[1] - gate.post_a[1]) < 4.0:
         return None, None
@@ -199,14 +310,23 @@ def extract_gate_crops(frame_bgr: np.ndarray, gate: GateCandidate,
     above = rotated[y_up0:y_up1, x0:x1].copy() if y_up1 > y_up0 else None
     below = rotated[y_dn0:y_dn1, x0:x1].copy() if y_dn1 > y_dn0 else None
     if below is not None and below.size > 0:
-        below = cv2.rotate(below, cv2.ROTATE_180)
+        below = cv2.rotate(below, cv2.ROTATE_180)  # flip so digit reads in the same direction
     return above, below
 
 
 def extract_digit_crop(frame_bgr: np.ndarray, gate: GateCandidate):
-    """Crop über den LINKEN (dunkleren) Pfostenkreis — die Ziffer ist dort
-    eingezeichnet. Benutzt das dem Kreis EINBESCHRIEBENE Quadrat
-    (Halbseite = r/sqrt(2)), damit der Kreis selbst nicht im Crop landet."""
+    """Extracts a tight square crop around the digit inside the left post.
+
+    Uses the inscribed square of the post circle (half-side = r/√2) so the
+    circle outline itself is outside the crop.
+
+    Args:
+        frame_bgr: Full BGR frame.
+        gate: Gate candidate.
+
+    Returns:
+        BGR crop array, or None if the gate is too small.
+    """
     if np.hypot(gate.post_b[0] - gate.post_a[0],
                 gate.post_b[1] - gate.post_a[1]) < 4.0:
         return None
@@ -214,7 +334,7 @@ def extract_digit_crop(frame_bgr: np.ndarray, gate: GateCandidate):
     h, w = rotated.shape[:2]
     cx_l = mx - L / 2.0
     cy = my
-    half = ra / float(np.sqrt(2.0)) * 0.9
+    half = ra / float(np.sqrt(2.0)) * 0.9  # 90% of inscribed square half-side
     x0 = max(0, int(round(cx_l - half)))
     x1 = min(w, int(round(cx_l + half)))
     y0 = max(0, int(round(cy - half)))
@@ -226,8 +346,18 @@ def extract_digit_crop(frame_bgr: np.ndarray, gate: GateCandidate):
 
 def extract_gate_overview(frame_bgr: np.ndarray, gate: GateCandidate,
                           pad_factor: float = 0.2) -> np.ndarray:
-    """Rotierte Übersicht: beide Pfosten + Linie + Ziffer-Regionen sichtbar.
-    Linie und Pfostenkreise werden als Overlay eingezeichnet."""
+    """Returns a rotated overview crop showing both posts, the line, and digit regions.
+
+    Draws gate geometry as an overlay directly on the crop.
+
+    Args:
+        frame_bgr: Full BGR frame.
+        gate: Gate candidate.
+        pad_factor: Extra padding around posts as a fraction of post separation.
+
+    Returns:
+        BGR overview image.
+    """
     rotated, mx, my, L, ra, rb, _fwd = _rotate_for_gate(frame_bgr, gate)
     h, w = rotated.shape[:2]
     pad_x = int(L * pad_factor + max(ra, rb))
@@ -240,31 +370,42 @@ def extract_gate_overview(frame_bgr: np.ndarray, gate: GateCandidate,
         return np.zeros((1, 1, 3), dtype=np.uint8)
     crop = rotated[y0:y1, x0:x1].copy()
 
-    # Overlay in Crop-Koordinaten
+    # overlay in crop coordinates
     ax_c = int(mx - L / 2) - x0
     bx_c = int(mx + L / 2) - x0
     y_c = int(my) - y0
-    # Befahrbares Segment: nur zwischen den inneren Pfostenrändern
+    # traversable segment: only between the inner post edges
     cv2.line(crop, (ax_c + int(ra), y_c), (bx_c - int(rb), y_c),
-             (0, 255, 0), 1)
-    cv2.circle(crop, (ax_c, y_c), int(ra), (0, 255, 255), 1)
-    cv2.circle(crop, (bx_c, y_c), int(rb), (0, 255, 255), 1)
+             (0, 255, 0), 1)                                         # driveable gap in green
+    cv2.circle(crop, (ax_c, y_c), int(ra), (0, 255, 255), 1)        # left post circle
+    cv2.circle(crop, (bx_c, y_c), int(rb), (0, 255, 255), 1)        # right post circle
 
-    # OCR-Rechteck: einbeschriebenes Quadrat im linken Pfostenkreis
+    # OCR region: inscribed square in the left post circle
     half = ra / float(np.sqrt(2.0)) * 0.9
     cx_l = mx - L / 2.0
     ocr_x0 = int(round(cx_l - half)) - x0
     ocr_x1 = int(round(cx_l + half)) - x0
     ocr_y0 = int(round(my - half)) - y0
     ocr_y1 = int(round(my + half)) - y0
-    cv2.rectangle(crop, (ocr_x0, ocr_y0), (ocr_x1, ocr_y1), (255, 0, 255), 1)
+    cv2.rectangle(crop, (ocr_x0, ocr_y0), (ocr_x1, ocr_y1), (255, 0, 255), 1)  # OCR box
     return crop
 
 
 def build_crops_panel(frame_bgr: np.ndarray, gates: List[GateCandidate],
                       tile: int = 96) -> np.ndarray:
-    """Panel: eine Zeile pro Gate. Spalten: Übersicht (rotiert, overlay),
-    above-Crop, below-Crop."""
+    """Builds a debug panel showing one row per gate.
+
+    Each row contains a rotated overview with overlay and the preprocessed
+    OCR input image as sent to the classifier.
+
+    Args:
+        frame_bgr: Full BGR frame.
+        gates: List of gate candidates to display.
+        tile: Tile height in pixels.
+
+    Returns:
+        Stacked BGR panel image.
+    """
     if not gates:
         return np.zeros((tile, tile * 3, 3), dtype=np.uint8)
     overview_w = tile * 2
@@ -279,7 +420,7 @@ def build_crops_panel(frame_bgr: np.ndarray, gates: List[GateCandidate],
             scale = min(overview_w / ow, tile / oh)
             new_w = max(1, int(ow * scale))
             new_h = max(1, int(oh * scale))
-            ov = cv2.resize(overview, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            ov = cv2.resize(overview, (new_w, new_h), interpolation=cv2.INTER_AREA)  # scale to tile
             ov_tile = np.zeros((tile, overview_w, 3), dtype=np.uint8)
             y_off = (tile - new_h) // 2
             x_off = (overview_w - new_w) // 2
@@ -288,18 +429,17 @@ def build_crops_panel(frame_bgr: np.ndarray, gates: List[GateCandidate],
             ov_tile = np.zeros((tile, overview_w, 3), dtype=np.uint8)
         title = (f"#{g.digit} ({g.digit_confidence:.2f},{g.digit_side})"
                  if g.digit >= 0 else f"G{i} ?")
-        cv2.putText(ov_tile, title, (4, 14),
+        cv2.putText(ov_tile, title, (4, 14),   # gate label in top-left corner
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
 
-        # OCR-Input: dynamisches ROI nach Otsu + größter Komponente (wie an den
-        # Classifier geht)
+        # OCR input: dynamic ROI via Otsu + largest connected component (matches classifier input)
         raw = extract_digit_crop(frame_bgr, g)
         if raw is None:
             ocr_img = None
         else:
             from digits import preprocess_canvas
             canvas = preprocess_canvas(raw)
-            ocr_img = cv2.cvtColor(canvas, cv2.COLOR_GRAY2BGR)
+            ocr_img = cv2.cvtColor(canvas, cv2.COLOR_GRAY2BGR)  # grayscale to BGR for stacking
         if ocr_img is None or ocr_img.size == 0:
             ocr_tile = np.zeros((tile, ocr_w, 3), dtype=np.uint8)
         else:
@@ -308,12 +448,12 @@ def build_crops_panel(frame_bgr: np.ndarray, gates: List[GateCandidate],
             new_w = max(1, int(ow * scale))
             new_h = max(1, int(oh * scale))
             resized = cv2.resize(ocr_img, (new_w, new_h),
-                                 interpolation=cv2.INTER_AREA)
+                                 interpolation=cv2.INTER_AREA)  # scale to tile
             ocr_tile = np.zeros((tile, ocr_w, 3), dtype=np.uint8)
             y_off = (tile - new_h) // 2
             x_off = (ocr_w - new_w) // 2
             ocr_tile[y_off:y_off + new_h, x_off:x_off + new_w] = resized
-        cv2.putText(ocr_tile, "ocr", (4, 14),
+        cv2.putText(ocr_tile, "ocr", (4, 14),  # label OCR column
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
 
         rows.append(np.hstack([ov_tile, ocr_tile]))
@@ -322,10 +462,20 @@ def build_crops_panel(frame_bgr: np.ndarray, gates: List[GateCandidate],
 
 def classify_gate_digit(classifier, frame_bgr: np.ndarray,
                         gate: GateCandidate):
-    """Klassifiziert den Digit-Crop, setzt digit + forward-Vektor aus der
-    stabilen Gate-Rotation. Mutiert das Gate in-place."""
-    # Forward-Vektor aus der Rotation herleiten (stabil, unabhängig von
-    # der möglicherweise instabilen Helligkeits-Kanonisierung in detect_gates)
+    """Classifies the digit in a gate's left post and sets the forward vector.
+
+    Mutates the gate in place.
+
+    Args:
+        classifier: DigitClassifier instance.
+        frame_bgr: Full BGR frame.
+        gate: Gate candidate to update.
+
+    Returns:
+        Tuple (digit, confidence, digit_side).
+    """
+    # derive the forward vector from the stable gate rotation, independent of
+    # the brightness-based canonicalization in detect_gates
     rotated, mx, my, L, ra, rb, fwd = _rotate_for_gate(frame_bgr, gate)
     gate.forward = fwd
     crop = extract_digit_crop(frame_bgr, gate)
@@ -338,8 +488,15 @@ def classify_gate_digit(classifier, frame_bgr: np.ndarray,
 
 
 def order_gates(gates: List[GateCandidate]) -> Tuple[List[GateCandidate], List[str]]:
-    """Sortiert Gates nach erkannter Ziffer. Liefert (sorted_gates, warnings).
-    Warnt bei Duplikaten oder Lücken (0..N erwartet)."""
+    """Sorts gates by classified digit and reports ordering issues.
+
+    Args:
+        gates: List of gate candidates with digit set.
+
+    Returns:
+        Tuple (sorted_gates, warnings) where warnings lists duplicate or
+        missing gate IDs.
+    """
     warnings: List[str] = []
     valid = [g for g in gates if g.digit >= 0]
     valid.sort(key=lambda g: g.digit)
@@ -358,15 +515,23 @@ def order_gates(gates: List[GateCandidate]) -> Tuple[List[GateCandidate], List[s
 
 
 def _check_segment(a: Point, b: Point, gate: GateCandidate) -> int:
-    """Prüft ein einzelnes Segment a->b gegen ein Gate.
-    0 = kein Crossing, +1 = forward, -1 = wrong direction."""
+    """Tests whether segment a→b crosses the gate line.
+
+    Args:
+        a: Segment start.
+        b: Segment end.
+        gate: Gate to test against.
+
+    Returns:
+        0 = no crossing, +1 = forward direction, -1 = wrong direction.
+    """
     if not segments_intersect(a, b, gate.post_a, gate.post_b):
         return 0
     if point_segment_distance(gate.post_a, a, b) < gate.radius_a:
         return 0
     if point_segment_distance(gate.post_b, a, b) < gate.radius_b:
         return 0
-    # Forward aus stabiler Gate-Rotation, Fallback auf post_a→post_b Normale
+    # use stable forward vector from gate rotation; fall back to post_a→post_b normal
     fx, fy = gate.forward
     if abs(fx) < 1e-6 and abs(fy) < 1e-6:
         dx = gate.post_b[0] - gate.post_a[0]
@@ -381,17 +546,27 @@ def _check_segment(a: Point, b: Point, gate: GateCandidate) -> int:
 
 def gate_crossed(prev: Point, curr: Point, gate: GateCandidate,
                  trail: List[Point] = None, spline_n: int = 10) -> int:
-    """0 = keine Überquerung, +1 = forward, -1 = wrong direction.
+    """Checks whether the car path crosses a gate between two positions.
 
-    Wenn trail mind. 3 Punkte hat (vor prev), wird Catmull-Rom zwischen
-    prev und curr interpoliert und jedes Sub-Segment geprüft. Sonst
-    Fallback auf gerade Linie prev->curr."""
+    If the trail has at least 3 prior points, a Catmull-Rom spline is used
+    to interpolate the path; otherwise falls back to a straight segment.
+
+    Args:
+        prev: Previous car position.
+        curr: Current car position.
+        gate: Gate to test.
+        trail: Recent position history (up to last 3 points before prev).
+        spline_n: Number of spline sub-segments for the crossing check.
+
+    Returns:
+        0 = no crossing, +1 = forward, -1 = wrong direction.
+    """
     if trail is not None and len(trail) >= 3:
-        # Catmull-Rom braucht 4 Punkte: p0, p1(=prev), p2(=curr), p3
+        # Catmull-Rom needs 4 points: p0, p1 (≈ prev), p2 (≈ curr), p3
         p0 = trail[-3]
-        p1 = trail[-2]  # ~ prev
-        p2 = trail[-1]  # ~ curr (gerade angehängt)
-        # p3 extrapolieren: curr + (curr - prev) als Tangentenstütze
+        p1 = trail[-2]
+        p2 = trail[-1]
+        # extrapolate p3 as tangent support beyond curr
         p3 = (2 * curr[0] - prev[0], 2 * curr[1] - prev[1])
         pts = catmull_rom(p0, p1, p2, p3, n=spline_n)
         for i in range(len(pts) - 1):
@@ -403,12 +578,17 @@ def gate_crossed(prev: Point, curr: Point, gate: GateCandidate,
 
 
 def draw_gates(img: np.ndarray, gates: List[GateCandidate]):
+    """Draws all gates onto the overlay image with direction arrows and digit labels.
+
+    Args:
+        img: BGR image to draw on (modified in place).
+        gates: List of gate candidates to render.
+    """
     for i, g in enumerate(gates):
         ax, ay = int(g.post_a[0]), int(g.post_a[1])
         bx, by = int(g.post_b[0]), int(g.post_b[1])
-        cv2.circle(img, (ax, ay), int(g.radius_a), (0, 255, 255), 2)
-        cv2.circle(img, (bx, by), int(g.radius_b), (0, 255, 255), 2)
-        # Befahrbares Segment: nur zwischen den inneren Tangenten der Pfosten
+        cv2.circle(img, (ax, ay), int(g.radius_a), (0, 255, 255), 2)  # digit post circle
+        cv2.circle(img, (bx, by), int(g.radius_b), (0, 255, 255), 2)  # empty post circle
         dx, dy = bx - ax, by - ay
         L = float(np.hypot(dx, dy))
         mx, my = (ax + bx) // 2, (ay + by) // 2
@@ -417,9 +597,8 @@ def draw_gates(img: np.ndarray, gates: List[GateCandidate]):
             sx, sy = ax + ux * g.radius_a, ay + uy * g.radius_a
             ex, ey = bx - ux * g.radius_b, by - uy * g.radius_b
             cv2.line(img, (int(sx), int(sy)), (int(ex), int(ey)),
-                     (0, 255, 255), 2)
-            # Fahrrichtung: aus stabiler Gate-Rotation (gesetzt in classify_gate_digit),
-            # Fallback auf (uy, -ux) wenn noch nicht klassifiziert
+                     (0, 255, 255), 2)          # traversable segment between post edges
+            # forward direction from stable gate rotation; fall back to post normal
             fx, fy = g.forward
             if abs(fx) < 1e-6 and abs(fy) < 1e-6:
                 fx, fy = uy, -ux
@@ -429,7 +608,7 @@ def draw_gates(img: np.ndarray, gates: List[GateCandidate]):
             head_x = int(mx + fx * arrow_len / 2)
             head_y = int(my + fy * arrow_len / 2)
             cv2.arrowedLine(img, (tail_x, tail_y), (head_x, head_y),
-                            (0, 255, 255), 2, tipLength=0.3)
+                            (0, 255, 255), 2, tipLength=0.3)  # direction arrow
         if g.digit >= 0:
             text = str(g.digit)
             font = cv2.FONT_HERSHEY_SIMPLEX
@@ -439,8 +618,8 @@ def draw_gates(img: np.ndarray, gates: List[GateCandidate]):
             tx = bx - tw // 2
             ty = by + th // 2
             cv2.putText(img, text, (tx, ty), font, scale,
-                        (0, 0, 0), thick, cv2.LINE_AA)
+                        (0, 0, 0), thick, cv2.LINE_AA)  # digit label on the empty post
         else:
             cv2.putText(img, f"G{i}", (mx + 5, my - 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2,
-                        cv2.LINE_AA)
+                        cv2.LINE_AA)  # fallback index label when digit is unknown
