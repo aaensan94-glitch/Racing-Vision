@@ -1,0 +1,14 @@
+{
+  "lap_limit": 5,
+  "roi_pts": [],
+  "adjust": {
+    "Brightness": 125,
+    "Contrast": 109,
+    "Gamma": 131,
+    "Saturation": 100
+  },
+  "resolution": [
+    1280,
+    720
+  ]
+}
