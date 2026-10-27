@@ -205,3 +205,13 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Project-local
+logs/*.csv
+.vscode/
+.cspell/
+cspell.json
+data/
+models/*.pt
+configs/session*.json
+configs/gates*.json
