@@ -113,6 +113,49 @@ class LapTracker:
                         else st.expected - 1)
         return st.lap, gates_passed
 
+    def standings_order(self, car_names: List[str]) -> List[str]:
+        """Returns race order by laps, gates passed, and gate-crossing time."""
+        return sorted(
+            car_names,
+            key=lambda car: (
+                -self.race_progress(car)[0],
+                -self.race_progress(car)[1],
+                self.last_gate_time(car) is None,
+                (self.last_gate_time(car)
+                 if self.last_gate_time(car) is not None
+                 else float("inf")),
+                self.best_lap_time(car) is None,
+                (self.best_lap_time(car)
+                 if self.best_lap_time(car) is not None
+                 else float("inf")),
+            ),
+        )
+
+    def last_gate_time(self, car: str) -> Optional[float]:
+        """Returns the timestamp of the most recent valid gate crossing."""
+        return self._state[car].last_gate_t
+
+    def gap_to(self, car: str, ahead: str) -> str:
+        """Formats the gap to a car ahead using shared timing checkpoints."""
+        car_lap, car_gate = self.race_progress(car)
+        ahead_lap, ahead_gate = self.race_progress(ahead)
+        lap_gap = ahead_lap - car_lap
+        if lap_gap > 0:
+            return f"+{lap_gap} lap" if lap_gap == 1 else f"+{lap_gap} laps"
+
+        gate_gap = ahead_gate - car_gate
+        if gate_gap > 0:
+            return (f"+{gate_gap} sector" if gate_gap == 1
+                    else f"+{gate_gap} sectors")
+        if gate_gap < 0 or car_gate < 0:
+            return "--"
+
+        car_time = self.last_gate_time(car)
+        ahead_time = self.last_gate_time(ahead)
+        if car_time is None or ahead_time is None:
+            return "--"
+        return f"+{max(0.0, car_time - ahead_time):.2f}s"
+
     def last_lap_time(self, car: str) -> Optional[float]:
         """Returns the last completed lap time in seconds, or None."""
         return self._state[car].last_lap_time

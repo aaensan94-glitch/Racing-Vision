@@ -15,9 +15,9 @@ a countdown, lap counting, best-lap times, and text-to-speech announcements.
   adjustable lap limit via Left/Right arrows, finishing position announced
   at the finish line.
 - **Text-to-speech** (espeak-ng; Windows PowerShell): enthusiastic English
-  lap announcements and finish calls, non-blocking in its own thread. Windows
-  keeps the built-in speech engine running between calls and prefers an
-  installed English male voice (David/Mark where available), with a lower,
+  lap, finish, and Lewis/Max overtake calls, non-blocking in its own thread.
+  Windows keeps the built-in speech engine running between calls and prefers
+  an installed English male voice (David/Mark where available), with a lower,
   cinematic pitch; espeak-ng uses its English male voice.
 - **Pit call**: pressing `p` pauses and plays a radio-style double tone plus
   “Box, box!”; pressing it again resumes with an English call.
@@ -98,7 +98,7 @@ light and avoid hard shadows over the track.
 | `t` | Clear all trails. |
 | `f` | Toggle fullscreen. |
 | `i` | Toggle the regular HUD panels. |
-| `l` | Toggle live standings (ranked by completed laps, sector progress, then best lap). |
+| `l` | Toggle live standings (ranked by race progress, with the gap to the car ahead). |
 | `q` / `ESC` | Quit and save session. |
 
 ### Simulator only

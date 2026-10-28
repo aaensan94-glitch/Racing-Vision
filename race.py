@@ -151,6 +151,42 @@ def tick_countdown(state: RaceState, t: float) -> None:
         print(f"[race] GO! {state.race_laps} laps")
 
 
+def overtake_announcement(
+    state: RaceState,
+    passer: str,
+    previous_order: List[str],
+) -> Optional[str]:
+    """Returns the custom Lewis/Max call when one passes the other."""
+    order = state.lap_tracker.standings_order(state.car_names)
+    if passer not in previous_order or passer not in order:
+        return None
+
+    passer_name = state.display_names[passer].casefold()
+    if "lewis" in passer_name:
+        target_name = "max"
+        call = "Lewis P1!"
+    elif "max" in passer_name:
+        target_name = "lewis"
+        call = "Max P1!"
+    else:
+        return None
+
+    target = next(
+        (name for name in state.car_names
+         if target_name in state.display_names[name].casefold()),
+        None,
+    )
+    if target is None or target not in previous_order or target not in order:
+        return None
+    if (state.lap_tracker.race_progress(passer)[1] < 0
+            or state.lap_tracker.race_progress(target)[1] < 0):
+        return None
+
+    was_behind = previous_order.index(passer) > previous_order.index(target)
+    is_ahead = order.index(passer) < order.index(target)
+    return call if was_behind and is_ahead else None
+
+
 def process_gate_crossings(
     state: RaceState,
     gates: List[GateCandidate],
@@ -185,6 +221,11 @@ def process_gate_crossings(
                             was_armed = state.armed_before[name]
                             if g.digit == 0:
                                 state.armed_before[name] = True
+                            previous_order = (
+                                state.lap_tracker.standings_order(
+                                    state.car_names)
+                                if state.race_active else []
+                            )
                             ev = state.lap_tracker.on_forward_crossing(
                                 name, g.digit, t)
                             if ev is not None and ev["lap_time_s"] is not None:
@@ -261,6 +302,13 @@ def process_gate_crossings(
                                     delta_s = f"  [{delta}]" if delta else ""
                                     print(f"[sector] {display_name} gate {ev['gate']} "
                                           f"sector={ev['sector_s']:.3f}s{delta_s}")
+                            if (ev is not None and state.race_active
+                                    and was_armed
+                                    and not state.race_finished[name]):
+                                call = overtake_announcement(
+                                    state, name, previous_order)
+                                if call:
+                                    sound.say(call, priority=True, speed=280)
                         else:
                             sound.play_alarm()
                         did = g.digit if g.digit >= 0 else gi

@@ -6,7 +6,7 @@ import numpy as np
 
 import sound
 from app import handle_key
-from race import RaceState
+from race import RaceState, overtake_announcement
 
 
 class AudioControlTests(unittest.TestCase):
@@ -69,6 +69,51 @@ class AudioControlTests(unittest.TestCase):
 
         self.assertIn("[Console]::In.ReadLine()", script)
         self.assertIn('pitch=\"-15%\"', script)
+        self.assertIn("SpeakSsmlAsync", script)
+        self.assertIn("SpeakAsyncCancelAll", script)
+
+    def test_overtake_calls_only_play_when_lewis_or_max_passes_the_other(self):
+        state = RaceState.create(
+            ["lewis", "max"],
+            num_gates=3,
+            display_names={"lewis": "Lewis", "max": "Max"},
+        )
+        tracker = state.lap_tracker
+        tracker.on_forward_crossing("lewis", 0, 0.0)
+        tracker.on_forward_crossing("max", 0, 0.5)
+        previous_order = tracker.standings_order(state.car_names)
+
+        self.assertEqual(previous_order, ["lewis", "max"])
+        self.assertIsNone(
+            overtake_announcement(state, "max", previous_order))
+
+        tracker.on_forward_crossing("max", 1, 2.5)
+        self.assertEqual(
+            overtake_announcement(state, "max", previous_order),
+            "Max P1!",
+        )
+
+        previous_order = tracker.standings_order(state.car_names)
+        self.assertIsNone(
+            overtake_announcement(state, "max", previous_order))
+
+    def test_lewis_overtake_call(self):
+        state = RaceState.create(
+            ["lewis", "max"],
+            num_gates=3,
+            display_names={"lewis": "Lewis", "max": "Max"},
+        )
+        tracker = state.lap_tracker
+        tracker.on_forward_crossing("max", 0, 0.0)
+        tracker.on_forward_crossing("lewis", 0, 0.5)
+        previous_order = tracker.standings_order(state.car_names)
+        self.assertEqual(previous_order, ["max", "lewis"])
+
+        tracker.on_forward_crossing("lewis", 1, 2.5)
+        self.assertEqual(
+            overtake_announcement(state, "lewis", previous_order),
+            "Lewis P1!",
+        )
 
 
 if __name__ == "__main__":

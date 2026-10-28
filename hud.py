@@ -254,57 +254,97 @@ def draw_standings_panel(
     lap_tracker: Any,
     colors: Dict[str, Tuple[int, int, int]],
 ) -> None:
-    """Draws a live right-side leaderboard, ordered by lap and sector progress."""
+    """Draws a compact, broadcast-style live timing tower."""
     if not car_names:
         return
 
-    ordered = sorted(
-        enumerate(car_names),
-        key=lambda item: (
-            -lap_tracker.race_progress(item[1])[0],
-            -lap_tracker.race_progress(item[1])[1],
-            lap_tracker.best_lap_time(item[1]) is None,
-            lap_tracker.best_lap_time(item[1]) or float("inf"),
-            item[0],
-        ),
-    )
-    x_right = overlay.shape[1] - 10
+    ordered = lap_tracker.standings_order(car_names)
+    frame_h, frame_w = overlay.shape[:2]
+    margin = 12
     y = 62
-    line_h = max(hud.line_h, 24)
-    max_rows = max(0, (overlay.shape[0] - y - 10 - 2 * hud.pad) // line_h - 1)
+    pad = 12
+    panel_w = min(frame_w - 2 * margin, max(270, int(frame_w * 0.34)), 420)
+    row_h = max(28, min(38, hud.line_h))
+    title_h = 34
+    header_h = 25
+    max_rows = max(
+        0, (frame_h - y - margin - 2 * pad - title_h - header_h) // row_h
+    )
     entries = []
-    for place, (_order, name) in enumerate(ordered[:max_rows], start=1):
-        display_name = display_names.get(name, name)[:16]
+    for place, name in enumerate(ordered[:max_rows], start=1):
+        display_name = display_names.get(name, name)
         laps, gates_passed = lap_tracker.race_progress(name)
         best = lap_tracker.best_lap_time(name)
         best_s = f"{best:.2f}" if best is not None else "--"
-        entries.append(
-            (place, name, f"{place:>2}  {display_name:<16} "
-             f"{laps:>2}L S{gates_passed + 1}  {best_s:>6}")
-        )
-    header = "POS  DRIVER          LAP SEC   BEST"
-    font_scale = min(hud.scale, 0.58)
-    thickness = max(1, hud.thickness)
-    text_width = max(
-        cv2.getTextSize(header, hud.FONT, font_scale, thickness)[0][0],
-        *(cv2.getTextSize(text, hud.FONT, font_scale, thickness)[0][0]
-          for _place, _name, text in entries),
-    )
-    panel_w = min(text_width + 2 * hud.pad + 8, overlay.shape[1] - 20)
-    panel_h = (len(entries) + 1) * line_h + 2 * hud.pad
-    x = x_right - panel_w
-    _panel(overlay, x, y, panel_w, panel_h, hud.panel_alpha)
-    cv2.putText(overlay, header, (x + hud.pad, y + hud.pad + line_h - 7),
-                hud.FONT, font_scale, hud.color, thickness, cv2.LINE_AA)
-    for row, (place, name, text) in enumerate(entries, start=1):
-        row_y = y + hud.pad + (row + 1) * line_h - 7
+        gap = "LEAD" if place == 1 else lap_tracker.gap_to(
+            name, ordered[place - 2])
+        entries.append((place, name, display_name, laps,
+                        gates_passed, best_s, gap))
+
+    panel_h = 2 * pad + title_h + header_h + len(entries) * row_h
+    x = frame_w - margin - panel_w
+    _panel(overlay, x, y, panel_w, panel_h, 0.82)
+    cv2.rectangle(overlay, (x, y), (x + panel_w, y + 3), (20, 35, 230), -1)
+
+    scale = min(0.52, 0.52 * panel_w / 420)
+    scale = max(0.32, scale)
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    cv2.putText(overlay, "LIVE TIMING", (x + pad, y + 24),
+                font, scale, (245, 245, 245), 1, cv2.LINE_AA)
+    cv2.putText(overlay, "RACE ORDER", (x + panel_w - pad - 82, y + 24),
+                font, scale * 0.78, (145, 155, 170), 1, cv2.LINE_AA)
+
+    table_y = y + pad + title_h
+    cv2.rectangle(overlay, (x + 1, table_y),
+                  (x + panel_w - 1, table_y + header_h),
+                  (43, 48, 58), -1)
+    inner_x = x + pad
+    inner_w = panel_w - 2 * pad
+    pos_w = max(23, int(inner_w * 0.09))
+    driver_w = int(inner_w * 0.35)
+    lap_w = int(inner_w * 0.14)
+    best_w = int(inner_w * 0.19)
+    gap_w = inner_w - pos_w - driver_w - lap_w - best_w
+    columns = [
+        ("P", pos_w), ("DRIVER", driver_w), ("LAP", lap_w),
+        ("BEST", best_w), ("GAP", gap_w),
+    ]
+    column_x = inner_x
+    header_scale = scale * 0.72
+    for label, width in columns:
+        cv2.putText(overlay, label, (column_x, table_y + 17),
+                    font, header_scale, (155, 165, 180), 1, cv2.LINE_AA)
+        column_x += width
+
+    for row, (place, name, driver, laps, gates_passed, best, gap) in enumerate(entries):
+        row_top = table_y + header_h + row * row_h
+        baseline = row_top + (row_h + 6) // 2
+        row_color = (35, 39, 48) if row % 2 == 0 else (27, 31, 39)
+        cv2.rectangle(overlay, (x + 1, row_top),
+                      (x + panel_w - 1, row_top + row_h), row_color, -1)
         if place == 1:
-            cv2.rectangle(overlay, (x + 2, row_y - line_h + 4),
-                          (x + panel_w - 2, row_y + 3), (55, 55, 55), -1)
-        cv2.rectangle(overlay, (x + 4, row_y - line_h + 7),
-                      (x + 7, row_y + 1), colors[name], -1)
-        cv2.putText(overlay, text, (x + hud.pad, row_y),
-                    hud.FONT, font_scale, hud.color, thickness, cv2.LINE_AA)
+            cv2.rectangle(overlay, (x + 1, row_top),
+                          (x + panel_w - 1, row_top + row_h), (48, 50, 57), -1)
+        cv2.rectangle(overlay, (x + 5, row_top + 5),
+                      (x + 8, row_top + row_h - 5), colors[name], -1)
+
+        values = [
+            (str(place), (245, 245, 245), pos_w),
+            (driver, (245, 245, 245), driver_w),
+            (f"{laps}L S{gates_passed + 1}" if gates_passed >= 0
+             else f"{laps}L --", (190, 198, 210), lap_w),
+            (best, (190, 198, 210), best_w),
+            (gap, (90, 220, 245) if place > 1 else (120, 220, 130), gap_w),
+        ]
+        column_x = inner_x
+        for value, color, width in values:
+            text = value
+            while (text and cv2.getTextSize(
+                    text, font, scale, 1)[0][0] > width - 4):
+                text = text[:-1]
+            cv2.putText(overlay, text, (column_x, baseline),
+                        font, scale, color, 1, cv2.LINE_AA)
+            column_x += width
 
 
 def draw_help_panel(overlay: np.ndarray, hud: HudConfig,

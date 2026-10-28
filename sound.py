@@ -312,16 +312,20 @@ def _powershell_tts_script() -> str:
         "while ($null -ne ($line = [Console]::In.ReadLine())) { "
         "$decoded = [Text.Encoding]::UTF8.GetString("
         "[Convert]::FromBase64String($line)); "
-        "$tab = $decoded.IndexOf([char]9); "
-        "$rate = [int]$decoded.Substring(0, $tab); "
-        "$synth.Rate = [Math]::Max(-10, [Math]::Min(10, $rate)); "
-        "$text = $decoded.Substring($tab + 1); "
+        "$firstTab = $decoded.IndexOf([char]9); "
+        "$secondTab = $decoded.IndexOf([char]9, $firstTab + 1); "
+        "if ($decoded.Substring(0, $firstTab) -eq '1') { "
+        "$synth.SpeakAsyncCancelAll() }; "
+        "$synth.Rate = [Math]::Max(-10, [Math]::Min(10, "
+        "[int]$decoded.Substring($firstTab + 1, "
+        "$secondTab - $firstTab - 1))); "
+        "$text = $decoded.Substring($secondTab + 1); "
         "$safeText = [Security.SecurityElement]::Escape($text); "
         "$ssml = '<speak version=\"1.0\" "
         "xmlns=\"http://www.w3.org/2001/10/synthesis\" "
         "xml:lang=\"en-US\"><prosody pitch=\"-15%\">' + "
         "$safeText + '</prosody></speak>'; "
-        "$synth.SpeakSsml($ssml) }; "
+        "$synth.SpeakSsmlAsync($ssml) }; "
         "$synth.Dispose()"
     )
 
@@ -351,7 +355,7 @@ def _tts_worker() -> None:
         if item is None:
             _tts_queue.task_done()
             break
-        text, speed = item
+        text, speed, priority = item
         if _tts_cmd is not None and _tts_backend == "espeak":
             subprocess.run(
                 [_tts_cmd, "-v", "en+m3", "-p", "38", "-a", "180",
@@ -368,9 +372,11 @@ def _tts_worker() -> None:
                     _tts_proc = None
             if _tts_proc is not None and _tts_proc.stdin is not None:
                 try:
+                    rate = max(-10, min(10, round((speed - 180) / 30)))
+                    priority_flag = "1" if priority else "0"
                     encoded = base64.b64encode(
-                        (f"{max(-10, min(10, round((speed - 180) / 30)))}"
-                         f"\t{text}").encode("utf-8")).decode("ascii")
+                        f"{priority_flag}\t{rate}\t{text}".encode("utf-8")
+                    ).decode("ascii")
                     _tts_proc.stdin.write(encoded + "\n")
                     _tts_proc.stdin.flush()
                 except (BrokenPipeError, OSError, ValueError) as exc:
@@ -412,7 +418,7 @@ def say(text: str, priority: bool = False, speed: int = 300) -> None:
                 _tts_queue.task_done()
             except queue.Empty:
                 break
-    _tts_queue.put((_fix_pronunciation(text), speed))
+    _tts_queue.put((_fix_pronunciation(text), speed, priority))
 
 
 def tts_busy() -> bool:

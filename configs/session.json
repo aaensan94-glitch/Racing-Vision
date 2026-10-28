@@ -1,10 +1,10 @@
 {
-  "lap_limit": 5,
+  "lap_limit": 10,
   "roi_pts": [],
   "adjust": {
-    "Brightness": 125,
-    "Contrast": 109,
-    "Gamma": 131,
+    "Brightness": 73,
+    "Contrast": 100,
+    "Gamma": 101,
     "Saturation": 100
   },
   "resolution": [
