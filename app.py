@@ -20,6 +20,12 @@ from session import LOGS_DIR, save_race_logs
 
 WINDOW = "Race Vision CV1"
 ADJUST_WIN = "Image Adjust"
+_ARROW_KEYS = {
+    81: "left", 83: "right", 82: "up", 84: "down",
+    65361: "left", 65362: "up", 65363: "right", 65364: "down",
+    0x250000: "left", 0x260000: "up",
+    0x270000: "right", 0x280000: "down",
+}
 ADJUST_SLIDERS: List[Tuple[str, int, int]] = [
     ("Brightness", 100, 200),
     ("Contrast",   100, 300),
@@ -41,6 +47,7 @@ class AppState:
         digit_classifier: Lazy-loaded DigitClassifier, or None.
         use_clahe: Apply CLAHE contrast enhancement to the overlay.
         show_hud: Render the HUD overlay.
+        show_standings: Render the live race standings panel.
         adjust_open: The image-adjust trackbar window is open.
         adjust_vals: Current slider values keyed by slider name.
         fullscreen: Window is in fullscreen mode.
@@ -57,6 +64,7 @@ class AppState:
     digit_classifier: Any
     use_clahe: bool
     show_hud: bool
+    show_standings: bool
     adjust_open: bool
     adjust_vals: Dict[str, int]
     fullscreen: bool
@@ -130,6 +138,7 @@ class AppState:
             digit_classifier=None,
             use_clahe=False,
             show_hud=True,
+            show_standings=True,
             adjust_open=False,
             adjust_vals=adjust_vals,
             fullscreen=True,
@@ -162,7 +171,7 @@ def handle_key(key: int, app: AppState, state: RaceState,
     """Dispatches a keypress; mutates app and state in place.
 
     Args:
-        key: Key code from cv2.waitKey (255 = no key pressed).
+        key: Key code from cv2.waitKeyEx (-1 = no key pressed).
         app: Application state, mutated in place.
         state: Race state, mutated in place.
         frame: Current BGR frame (used by 'g' for gate detection).
@@ -176,6 +185,7 @@ def handle_key(key: int, app: AppState, state: RaceState,
     Returns:
         True if the caller should exit the main loop.
     """
+    key = _ARROW_KEYS.get(key, key)
     if key in (27, ord("q")):
         return True
     elif key == ord("d"):
@@ -218,6 +228,9 @@ def handle_key(key: int, app: AppState, state: RaceState,
     elif key == ord("i"):
         app.show_hud = not app.show_hud
         print(f"[hud] {'ON' if app.show_hud else 'OFF'}")
+    elif key == ord("l"):
+        app.show_standings = not app.show_standings
+        print(f"[standings] {'ON' if app.show_standings else 'OFF'}")
     elif key == ord("c"):
         if app.mouse_state["roi_editing"]:
             app.mouse_state["roi_editing"] = False
@@ -261,16 +274,18 @@ def handle_key(key: int, app: AppState, state: RaceState,
         if hasattr(app.cap, "reverse"):
             app.cap.reverse()
             print("[sim] reversed direction")
-    elif key == 82 and hasattr(app.cap, "speed_up"):    # arrow up
+    elif key == "up" and hasattr(app.cap, "speed_up"):
         app.cap.speed_up()
         print(f"[sim] faster — period={app.cap._period:.2f}s")
-    elif key == 84 and hasattr(app.cap, "speed_down"):  # arrow down
+    elif key == "down" and hasattr(app.cap, "speed_down"):
         app.cap.speed_down()
         print(f"[sim] slower — period={app.cap._period:.2f}s")
-    elif key == 83 and not state.race_active and state.countdown_t0 is None:  # right
+    elif (key == "right" and not state.race_active
+          and state.countdown_t0 is None):
         state.race_laps = min(100, state.race_laps + 5)
         print(f"[race] laps={state.race_laps}")
-    elif key == 81 and not state.race_active and state.countdown_t0 is None:  # left
+    elif (key == "left" and not state.race_active
+          and state.countdown_t0 is None):
         state.race_laps = max(5, state.race_laps - 5)
         print(f"[race] laps={state.race_laps}")
     elif key == ord("f"):

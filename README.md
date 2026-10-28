@@ -16,15 +16,17 @@ a countdown, lap counting, best-lap times, and text-to-speech announcements.
   at the finish line.
 - **Text-to-speech** (espeak-ng; Windows PowerShell): enthusiastic English
   lap announcements and finish calls, non-blocking in its own thread. Windows
-  prefers an installed English male voice (David/Mark where available);
-  espeak-ng uses its English male voice.
+  keeps the built-in speech engine running between calls and prefers an
+  installed English male voice (David/Mark where available), with a lower,
+  cinematic pitch; espeak-ng uses its English male voice.
 - **Pit call**: pressing `p` pauses and plays a radio-style double tone plus
   “Box, box!”; pressing it again resumes with an English call.
 - **Trails**: history trail transparent, current lap trail opaque, best-lap
   trail thicker; start/end snapped exactly to the gate crossing point.
 - **Overlay/HUD**: info panel top-left (color, HSV, position, speed, times),
   FPS + lap status top-right, help text bottom, HSV color picker under the
-  mouse — all togglable with `i`.
+  mouse — togglable with `i`; a Formula 1-style live standings panel on the
+  right can be toggled separately with `l`.
 - **CSV logging**: positions and speeds (`px/s`, calibrated `m/s` where available),
   plus separate gate-event, sector, completed-lap, and lap-summary files.
 - **Speed scale**: live-camera `m/s` is estimated from gate 0's 7.5 cm
@@ -95,7 +97,8 @@ light and avoid hard shadows over the track.
 | `p` | Pause. |
 | `t` | Clear all trails. |
 | `f` | Toggle fullscreen. |
-| `i` | Toggle HUD (all panels). |
+| `i` | Toggle the regular HUD panels. |
+| `l` | Toggle live standings (ranked by completed laps, sector progress, then best lap). |
 | `q` / `ESC` | Quit and save session. |
 
 ### Simulator only

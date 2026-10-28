@@ -246,6 +246,67 @@ def draw_status_panel(overlay: np.ndarray, hud: HudConfig, fps: float,
         cursor += hud.line_h
 
 
+def draw_standings_panel(
+    overlay: np.ndarray,
+    hud: HudConfig,
+    car_names: List[str],
+    display_names: Dict[str, str],
+    lap_tracker: Any,
+    colors: Dict[str, Tuple[int, int, int]],
+) -> None:
+    """Draws a live right-side leaderboard, ordered by lap and sector progress."""
+    if not car_names:
+        return
+
+    ordered = sorted(
+        enumerate(car_names),
+        key=lambda item: (
+            -lap_tracker.race_progress(item[1])[0],
+            -lap_tracker.race_progress(item[1])[1],
+            lap_tracker.best_lap_time(item[1]) is None,
+            lap_tracker.best_lap_time(item[1]) or float("inf"),
+            item[0],
+        ),
+    )
+    x_right = overlay.shape[1] - 10
+    y = 62
+    line_h = max(hud.line_h, 24)
+    max_rows = max(0, (overlay.shape[0] - y - 10 - 2 * hud.pad) // line_h - 1)
+    entries = []
+    for place, (_order, name) in enumerate(ordered[:max_rows], start=1):
+        display_name = display_names.get(name, name)[:16]
+        laps, gates_passed = lap_tracker.race_progress(name)
+        best = lap_tracker.best_lap_time(name)
+        best_s = f"{best:.2f}" if best is not None else "--"
+        entries.append(
+            (place, name, f"{place:>2}  {display_name:<16} "
+             f"{laps:>2}L S{gates_passed + 1}  {best_s:>6}")
+        )
+    header = "POS  DRIVER          LAP SEC   BEST"
+    font_scale = min(hud.scale, 0.58)
+    thickness = max(1, hud.thickness)
+    text_width = max(
+        cv2.getTextSize(header, hud.FONT, font_scale, thickness)[0][0],
+        *(cv2.getTextSize(text, hud.FONT, font_scale, thickness)[0][0]
+          for _place, _name, text in entries),
+    )
+    panel_w = min(text_width + 2 * hud.pad + 8, overlay.shape[1] - 20)
+    panel_h = (len(entries) + 1) * line_h + 2 * hud.pad
+    x = x_right - panel_w
+    _panel(overlay, x, y, panel_w, panel_h, hud.panel_alpha)
+    cv2.putText(overlay, header, (x + hud.pad, y + hud.pad + line_h - 7),
+                hud.FONT, font_scale, hud.color, thickness, cv2.LINE_AA)
+    for row, (place, name, text) in enumerate(entries, start=1):
+        row_y = y + hud.pad + (row + 1) * line_h - 7
+        if place == 1:
+            cv2.rectangle(overlay, (x + 2, row_y - line_h + 4),
+                          (x + panel_w - 2, row_y + 3), (55, 55, 55), -1)
+        cv2.rectangle(overlay, (x + 4, row_y - line_h + 7),
+                      (x + 7, row_y + 1), colors[name], -1)
+        cv2.putText(overlay, text, (x + hud.pad, row_y),
+                    hud.FONT, font_scale, hud.color, thickness, cv2.LINE_AA)
+
+
 def draw_help_panel(overlay: np.ndarray, hud: HudConfig,
                     help_lines: List[str]) -> None:
     """Draws the bottom help-text panel.
@@ -434,7 +495,7 @@ def build_help_lines(source, race_mode, cal_mode, current_mode) -> List[str]:
     lines += [
         f"g=gates  k=contrast  a=adjust  c=roi  {h_hint}",
         "s=start  n=new-race  Left/Right=laps  p=pause  t=clear-trails",
-        "f=fullscreen  i=hud  q=quit",
+        "f=fullscreen  i=hud  l=standings  q=quit",
     ]
     return lines
 

@@ -4,7 +4,9 @@ Keeps a persistent aplay/pw-cat stream open and writes pre-built PCM samples
 directly to stdin on each play() call. Text-to-speech runs in a separate
 worker thread via espeak-ng.
 """
+import base64
 import io
+import queue
 import shutil
 import subprocess
 import sys
@@ -278,46 +280,114 @@ _tts_cmd: Optional[str] = None
 _tts_backend: Optional[str] = None
 _tts_queue: Queue = Queue()
 _tts_thread: Optional[threading.Thread] = None
+_tts_proc: Optional[subprocess.Popen] = None
+
+
+def _configure_tts() -> None:
+    global _tts_cmd, _tts_backend
+    if _tts_cmd is not None:
+        return
+    if sys.platform == "win32":
+        _tts_cmd = shutil.which("powershell.exe") or shutil.which("powershell")
+        if _tts_cmd is not None:
+            _tts_backend = "powershell"
+    if _tts_cmd is None:
+        _tts_cmd = shutil.which("espeak-ng") or shutil.which("espeak")
+        if _tts_cmd is not None:
+            _tts_backend = "espeak"
+
+
+def _powershell_tts_script() -> str:
+    """Creates a persistent System.Speech reader with a generic baritone tone."""
+    return (
+        "Add-Type -AssemblyName System.Speech; "
+        "$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+        "$voices = $synth.GetInstalledVoices() | "
+        "Where-Object { $_.VoiceInfo.Culture.Name -like 'en-*' -and "
+        "$_.VoiceInfo.Gender -eq 'Male' }; "
+        "$voice = $voices | Where-Object { "
+        "$_.VoiceInfo.Name -match 'David|Mark' } | Select-Object -First 1; "
+        "if (-not $voice) { $voice = $voices | Select-Object -First 1 }; "
+        "if ($voice) { $synth.SelectVoice($voice.VoiceInfo.Name) }; "
+        "while ($null -ne ($line = [Console]::In.ReadLine())) { "
+        "$decoded = [Text.Encoding]::UTF8.GetString("
+        "[Convert]::FromBase64String($line)); "
+        "$tab = $decoded.IndexOf([char]9); "
+        "$rate = [int]$decoded.Substring(0, $tab); "
+        "$synth.Rate = [Math]::Max(-10, [Math]::Min(10, $rate)); "
+        "$text = $decoded.Substring($tab + 1); "
+        "$safeText = [Security.SecurityElement]::Escape($text); "
+        "$ssml = '<speak version=\"1.0\" "
+        "xmlns=\"http://www.w3.org/2001/10/synthesis\" "
+        "xml:lang=\"en-US\"><prosody pitch=\"-15%\">' + "
+        "$safeText + '</prosody></speak>'; "
+        "$synth.SpeakSsml($ssml) }; "
+        "$synth.Dispose()"
+    )
+
+
+def _start_powershell_tts() -> subprocess.Popen:
+    return subprocess.Popen(
+        [_tts_cmd, "-NoProfile", "-NonInteractive", "-Command",
+         _powershell_tts_script()],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        encoding="utf-8",
+        bufsize=1,
+    )
 
 
 def _tts_worker() -> None:
+    global _tts_proc
+    if _tts_cmd is not None and _tts_backend == "powershell":
+        try:
+            _tts_proc = _start_powershell_tts()
+        except OSError as exc:
+            print(f"[sound] could not start speech engine: {exc}")
     while True:
         item = _tts_queue.get()
         if item is None:
+            _tts_queue.task_done()
             break
         text, speed = item
         if _tts_cmd is not None and _tts_backend == "espeak":
             subprocess.run(
-                [_tts_cmd, "-v", "en+m3", "-p", "65", "-a", "180",
+                [_tts_cmd, "-v", "en+m3", "-p", "38", "-a", "180",
                  "-s", str(speed), text],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
         elif _tts_cmd is not None and _tts_backend == "powershell":
-            rate = max(-10, min(10, round((speed - 180) / 30)))
-            script = (
-                "Add-Type -AssemblyName System.Speech; "
-                "$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
-                "$voices = $synth.GetInstalledVoices() | "
-                "Where-Object { $_.VoiceInfo.Culture.Name -like 'en-*' -and "
-                "$_.VoiceInfo.Gender -eq 'Male' }; "
-                "$voice = $voices | Where-Object { "
-                "$_.VoiceInfo.Name -match 'David|Mark' } | Select-Object -First 1; "
-                "if (-not $voice) { $voice = $voices | Select-Object -First 1 }; "
-                "if ($voice) { $synth.SelectVoice($voice.VoiceInfo.Name) }; "
-                f"$synth.Rate = {rate}; "
-                "$synth.Volume = 100; "
-                "$text = [Console]::In.ReadToEnd(); "
-                "$synth.Speak($text); $synth.Dispose()"
-            )
-            subprocess.run(
-                [_tts_cmd, "-NoProfile", "-NonInteractive", "-Command", script],
-                input=text,
-                text=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            if _tts_proc is None or _tts_proc.poll() is not None:
+                try:
+                    _tts_proc = _start_powershell_tts()
+                except OSError as exc:
+                    print(f"[sound] could not start speech engine: {exc}")
+                    _tts_proc = None
+            if _tts_proc is not None and _tts_proc.stdin is not None:
+                try:
+                    encoded = base64.b64encode(
+                        (f"{max(-10, min(10, round((speed - 180) / 30)))}"
+                         f"\t{text}").encode("utf-8")).decode("ascii")
+                    _tts_proc.stdin.write(encoded + "\n")
+                    _tts_proc.stdin.flush()
+                except (BrokenPipeError, OSError, ValueError) as exc:
+                    print(f"[sound] speech engine stopped: {exc}")
+                    _tts_proc = None
         _tts_queue.task_done()
+
+
+def initialize() -> None:
+    """Starts the speech worker early so its backend is ready before a lap."""
+    global _tts_thread
+    _configure_tts()
+    if _tts_cmd is None:
+        return
+    if _tts_thread is None or not _tts_thread.is_alive():
+        _tts_thread = threading.Thread(target=_tts_worker, daemon=True)
+        _tts_thread.start()
 
 
 def say(text: str, priority: bool = False, speed: int = 300) -> None:
@@ -331,26 +401,16 @@ def say(text: str, priority: bool = False, speed: int = 300) -> None:
         priority: If True, clears the queue before adding this message.
         speed: Speech rate in words per minute.
     """
-    global _tts_cmd, _tts_backend, _tts_thread
-    if _tts_cmd is None:
-        _tts_cmd = shutil.which("espeak-ng") or shutil.which("espeak")
-        if _tts_cmd is not None:
-            _tts_backend = "espeak"
-        elif sys.platform == "win32":
-            _tts_cmd = shutil.which("powershell.exe") or shutil.which("powershell")
-            if _tts_cmd is not None:
-                _tts_backend = "powershell"
+    initialize()
     if _tts_cmd is None:
         return
-    if _tts_thread is None or not _tts_thread.is_alive():
-        _tts_thread = threading.Thread(target=_tts_worker, daemon=True)
-        _tts_thread.start()
     if priority:
         # drain the queue so the finish announcement plays immediately
         while not _tts_queue.empty():
             try:
                 _tts_queue.get_nowait()
-            except Exception:
+                _tts_queue.task_done()
+            except queue.Empty:
                 break
     _tts_queue.put((_fix_pronunciation(text), speed))
 

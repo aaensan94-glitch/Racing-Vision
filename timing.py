@@ -104,6 +104,15 @@ class LapTracker:
         """Returns the current completed lap count for the car."""
         return self._state[car].lap
 
+    def race_progress(self, car: str) -> tuple[int, int]:
+        """Returns completed laps and gates passed in the current lap."""
+        st = self._state[car]
+        if not st.armed:
+            return st.lap, -1
+        gates_passed = (self.num_gates - 1 if st.expected == 0
+                        else st.expected - 1)
+        return st.lap, gates_passed
+
     def last_lap_time(self, car: str) -> Optional[float]:
         """Returns the last completed lap time in seconds, or None."""
         return self._state[car].last_lap_time

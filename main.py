@@ -16,13 +16,14 @@ from session import (LOGS_DIR, HUD_CFG_PATH, CARS_CFG_PATH,
                      _load_session, _save_session, _session_path,
                      save_race_logs, open_log)
 from hud import (HudConfig, draw_trails, draw_traffic_light, draw_info_panel,
-                 draw_status_panel, draw_help_panel, draw_hsv_picker,
+                 draw_status_panel, draw_standings_panel, draw_help_panel, draw_hsv_picker,
                  draw_roi_overlay, draw_gate_flash, draw_adjust_window,
                  draw_car_markers, build_help_lines)
 from perf import Perf
 from vision import MultiTracker, apply_image_adjustments, apply_roi_mask
 from gates import draw_gates, meters_per_pixel_from_gate
 from race import RaceState, tick_countdown, process_gate_crossings
+import sound
 
 Point = Tuple[float, float]
 
@@ -58,6 +59,7 @@ def main():
                                  name: tracker.car(name).display_name or name
                                  for name in car_names
                              })
+    sound.initialize()
     meters_per_pixel = (
         meters_per_pixel_from_gate(app.gates) if source != "sim" else None
     )
@@ -82,8 +84,8 @@ def main():
                         if fid != app.last_frame_id:
                             app.last_frame_id = fid
                             break
-                        k = cv2.waitKey(1) & 0xFF
-                        if k != 255:
+                        k = cv2.waitKeyEx(1)
+                        if k != -1:
                             if handle_key(k, app, state, frame, frame_proc,
                                           source, car_names, race_mode,
                                           cal_mode, perf):
@@ -170,6 +172,9 @@ def main():
             draw_hsv_picker(overlay, frame, app.mouse_state["x"],
                             app.mouse_state["y"],
                             app.mouse_state["last_move_t"], t, hud)
+        if app.show_standings:
+            draw_standings_panel(overlay, hud, car_names,
+                                 state.display_names, state.lap_tracker, colors)
         perf.mark("hud", perf.now() - _t_hud)
 
         with perf.timed("imshow"):
@@ -186,7 +191,7 @@ def main():
 
         perf.tick()
 
-        key = cv2.waitKey(1) & 0xFF  # poll keyboard; 1 ms timeout caps CPU usage
+        key = cv2.waitKeyEx(1)  # preserve extended arrow-key codes on Windows
         if handle_key(key, app, state, frame, frame_proc,
                       source, car_names, race_mode, cal_mode, perf):
             print("[app] exit requested (q/Esc)")
